@@ -10,7 +10,7 @@ services:
     environment:
       CONFIG_FILE: /config/config.yaml
       # Werte aus .env; nicht in die YAML-Datei schreiben.
-      RTSP2JPEG_TOKEN: ${RTSP2JPEG_TOKEN:-}
+      RTSP2JPEG_TOKEN: ${RTSP2JPEG_TOKEN:?bitte in .env setzen -- Token erzeugen mit: docker compose run --rm rtsp2jpeg --token-erzeugen}
       KAMERA_USER: ${KAMERA_USER:-}
       KAMERA_PASS: ${KAMERA_PASS:-}
       TZ: Europe/Berlin

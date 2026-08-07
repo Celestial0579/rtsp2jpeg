@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import re
+import secrets
 import socket
 import threading
 import time
@@ -385,16 +386,49 @@ def make_server(config: Config, pool: GrabberPool) -> Server:
     return Server((config.server.host, config.server.port), handler)
 
 
+def token_erzeugen(laenge: int = 24) -> str:
+    """Erzeugt ein Token, das sich gefahrlos in eine URL schreiben laesst."""
+    return secrets.token_hex(laenge)
+
+
+def fehlt_der_zugangsschutz(config: Config) -> str | None:
+    """Begruendung, warum der Dienst nicht starten darf -- sonst None.
+
+    Der Dienst ist dafuer gedacht, aus dem Internet erreichbar zu sein: eine
+    STARFACE-Cloud-Anlage holt das Bild selbst ab. Ohne Zugangsschutz zu
+    starten hiesse, das Kamerabild der Haustuer jedem zu zeigen, der den Port
+    findet. Deshalb wird das nicht stillschweigend hingenommen, sondern muss
+    ausdruecklich gewollt sein.
+    """
+    server = config.server
+    if server.token or server.basic_auth or server.allow_anonymous:
+        return None
+    return (
+        "Kein Zugangsschutz eingerichtet -- der Dienst startet nicht.\n"
+        "\n"
+        "Ohne Token saehe jeder das Kamerabild, der den Port erreicht.\n"
+        "\n"
+        "Token erzeugen und eintragen:\n"
+        "    docker run --rm ghcr.io/celestial0579/rtsp2jpeg:latest --token-erzeugen\n"
+        "  danach als Umgebungsvariable TOKEN oder als 'token' in der\n"
+        "  Konfigurationsdatei setzen.\n"
+        "\n"
+        "Nur wenn der Dienst wirklich offen sein soll -- etwa in einem\n"
+        "abgeschotteten Netz -- laesst sich das ausdruecklich abschalten:\n"
+        "    ALLOW_ANONYMOUS=1   bzw.   server.allow_anonymous: true"
+    )
+
+
 def warn_ueber_die_absicherung(config: Config) -> list[str]:
     """Sammelt Hinweise, die vor dem Betrieb im offenen Netz wichtig sind."""
     hinweise = []
     server = config.server
 
-    if not server.token and not server.basic_auth:
+    if not server.token and not server.basic_auth and server.allow_anonymous:
         hinweise.append(
-            "Kein Zugangsschutz eingerichtet (weder 'token' noch 'basic_auth'). "
-            "Jeder, der den Port erreicht, sieht das Kamerabild. Im offenen "
-            "Netz ist das nicht vertretbar."
+            "Der Dienst laeuft ohne Zugangsschutz (allow_anonymous). Jeder, "
+            "der den Port erreicht, sieht das Kamerabild. Aus dem Internet "
+            "darf er so nicht erreichbar sein."
         )
     if server.token and len(server.token) < 24:
         hinweise.append(

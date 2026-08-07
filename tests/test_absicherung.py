@@ -95,9 +95,19 @@ class TestStartwarnungen:
             cameras={"t": CameraConfig(name="t", url="rtsp://h/s")},
         )
 
-    def test_ohne_zugangsschutz_wird_gewarnt(self):
-        hinweise = warn_ueber_die_absicherung(self.baue())
-        assert any("Kein Zugangsschutz" in h for h in hinweise)
+    def test_ohne_zugangsschutz_wird_nicht_nur_gewarnt(self):
+        """Fehlender Schutz ist kein Hinweis mehr, sondern ein Startabbruch.
+
+        Eine Warnzeile im Protokoll uebersieht man; siehe tests/test_token.py
+        fuer die Verweigerung selbst.
+        """
+        from rtsp2jpeg.server import fehlt_der_zugangsschutz
+
+        assert fehlt_der_zugangsschutz(self.baue()) is not None
+
+    def test_ausdruecklich_offener_betrieb_wird_gewarnt(self):
+        hinweise = warn_ueber_die_absicherung(self.baue(allow_anonymous=True))
+        assert any("ohne Zugangsschutz" in h for h in hinweise)
 
     def test_kurzes_token_wird_bemaengelt(self):
         hinweise = warn_ueber_die_absicherung(self.baue(token="kurz"))

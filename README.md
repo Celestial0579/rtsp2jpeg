@@ -29,11 +29,20 @@ Kamera ──RTSP──> rtsp2jpeg ──HTTP/JPEG──> STARFACE ──> Callm
 
 Eine einzelne Kamera, ohne Konfigurationsdatei:
 
+Zuerst ein Zugangstoken erzeugen — ohne startet der Dienst nicht:
+
+```bash
+docker run --rm ghcr.io/celestial0579/rtsp2jpeg:latest --token-erzeugen
+```
+
+Das gibt das Token aus und dazu die fertige URL, die in der STARFACE
+eingetragen wird. Dann den Dienst starten:
+
 ```bash
 docker run -d --name rtsp2jpeg -p 8080:8080 \
   -e CAMERA_URL="rtsp://benutzer:passwort@192.168.1.50:554/stream1" \
   -e CAMERA_NAME="tuer" \
-  -e TOKEN="$(openssl rand -hex 24)" \
+  -e TOKEN="DAS_ERZEUGTE_TOKEN" \
   ghcr.io/celestial0579/rtsp2jpeg:latest
 ```
 
@@ -77,11 +86,26 @@ nicht jeder HTTP-Client aus, und manche Java-Clients ignorieren ihn
 stillschweigend. Falls das Bild bei Variante 2 leer bleibt, ist das die erste
 Vermutung — dann auf das Token wechseln.
 
-Token erzeugen:
+Token erzeugen — gibt gleich die fertige Kamera-URL zum Kopieren mit aus:
 
 ```bash
-openssl rand -hex 24
+docker run --rm ghcr.io/celestial0579/rtsp2jpeg:latest --token-erzeugen --host tuerkamera.example.de --kamera tuer
 ```
+
+### Ohne Zugangsschutz startet der Dienst nicht
+
+Das ist Absicht. Eine Warnzeile im Protokoll übersieht man, und das Bild der
+eigenen Haustür gehört nicht ins offene Netz. Fehlen `token` und `basic_auth`,
+bricht der Start mit einer Anleitung ab und Exit-Code 3.
+
+Soll der Dienst wirklich ohne Schutz laufen — etwa in einem abgeschotteten
+Netz, in dem er ohnehin niemand erreicht —, muss das ausdrücklich dastehen:
+
+```bash
+-e ALLOW_ANONYMOUS=1        # bzw. server.allow_anonymous: true
+```
+
+Auch dann weist das Protokoll bei jedem Start darauf hin.
 
 ## Aus dem Internet erreichbar machen
 
@@ -150,6 +174,16 @@ Alles Weitere steht kommentiert in
 | `max_age` | 5.0 | ab wann ein Bild als abgestanden gilt |
 | `timeout` | 10.0 | wie lange eine Anfrage auf ein Bild wartet |
 | `read_timeout` | 10.0 | wie lange ffmpeg auf Daten der Kamera wartet |
+
+Auf der Serverseite:
+
+| Einstellung | Vorgabe | Bedeutung |
+|---|---|---|
+| `token` | — | Zugangstoken für `?token=…` |
+| `basic_auth` | — | `benutzer:passwort` für den URL-Vorspann |
+| `allow_anonymous` | false | Betrieb ganz ohne Zugangsschutz zulassen |
+| `protect_health` | false | auch `/healthz` hinter den Zugangsschutz stellen |
+| `trust_proxy` | false | `X-Forwarded-For` auswerten — nur mit echtem Proxy davor |
 
 Passwörter gehören nicht in die Datei — `${VARIABLE}` wird aus der Umgebung
 ersetzt, `${VARIABLE:-vorgabe}` mit Rückfallwert.

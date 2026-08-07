@@ -185,6 +185,28 @@ else:
     raise SystemExit('Zugriff war ohne Token moeglich')
 \""
 
+# Das Abbild des laufenden Dienstes -- nicht 'compose config --images',
+# das listet auch mediamtx und caddy, und die Reihenfolge ist nicht zugesagt.
+ABBILD="$(docker inspect --format '{{.Config.Image}}' \
+    "$("${COMPOSE[@]}" ps -q rtsp2jpeg)")"
+
+pruefe "ohne Zugangsschutz verweigert der Container den Start" bash -c "
+ausgabe=\$(timeout 30 docker run --rm -e CAMERA_URL=rtsp://127.0.0.1:554/x \
+    '$ABBILD' 2>&1 || true)
+echo \"\$ausgabe\" | grep -q 'startet nicht' || { echo \"\$ausgabe\"; exit 1; }"
+
+pruefe "ausdrueckliches ALLOW_ANONYMOUS startet trotzdem" bash -c "
+ausgabe=\$(timeout 15 docker run --rm -e CAMERA_URL=rtsp://127.0.0.1:554/x \
+    -e ALLOW_ANONYMOUS=1 '$ABBILD' 2>&1 || true)
+echo \"\$ausgabe\" | grep -q 'Hoere auf' || { echo \"\$ausgabe\"; exit 1; }
+echo \"\$ausgabe\" | grep -q 'ohne Zugangsschutz' || { echo 'Warnung fehlt'; exit 1; }"
+
+pruefe "--token-erzeugen liefert Token und fertige STARFACE-URL" bash -c "
+ausgabe=\$(timeout 30 docker run --rm '$ABBILD' --token-erzeugen)
+token=\$(echo \"\$ausgabe\" | head -1)
+echo \"\$token\" | grep -qE '^[0-9a-f]{48}\$' || { echo \"Token: \$token\"; exit 1; }
+echo \"\$ausgabe\" | grep -q \"?token=\$token\" || { echo 'URL fehlt'; exit 1; }"
+
 pruefe "Docker-Healthcheck steht auf healthy" bash -c "
 zustand=\$(docker inspect --format '{{.State.Health.Status}}' \
     \$(${COMPOSE[*]} ps -q rtsp2jpeg))
