@@ -6,6 +6,7 @@ import base64
 import time
 import urllib.parse
 
+import rtsp2jpeg.server
 from rtsp2jpeg.config import CameraConfig, Config, ServerConfig
 from rtsp2jpeg.server import Bremse, redact_query, warn_ueber_die_absicherung
 
@@ -29,6 +30,25 @@ class TestRedactQuery:
 class TestBremse:
     def test_erster_versuch_ohne_verzoegerung(self):
         bremse = Bremse()
+        assert bremse.delay_for("1.2.3.4") == 0.0
+
+    def test_unbekannte_gegenstelle_haengt_nicht_an_der_laufzeit(self, monkeypatch):
+        """Auf einem eben gestarteten Rechner ist time.monotonic() winzig.
+
+        Wer den Zeitstempel eines fehlenden Eintrags als 0.0 annimmt und
+        gegen die Verfallsfrist prueft, bremst dort jeden Erstbesucher aus --
+        auf einem seit Wochen laufenden Rechner faellt das nie auf. Deshalb
+        wird die Uhr hier auf frisch gestartet gestellt.
+        """
+        monkeypatch.setattr(rtsp2jpeg.server.time, "monotonic", lambda: 12.5)
+        bremse = Bremse(reset_after=900.0)
+        assert bremse.delay_for("noch.nie.gesehen") == 0.0
+        assert bremse.delay_for("auch.nicht.bekannt") == 0.0
+
+    def test_alte_fehlversuche_verfallen(self):
+        bremse = Bremse(reset_after=0.0)
+        bremse.note_failure("1.2.3.4")
+        time.sleep(0.01)
         assert bremse.delay_for("1.2.3.4") == 0.0
 
     def test_verzoegerung_waechst(self):

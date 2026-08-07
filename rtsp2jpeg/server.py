@@ -59,20 +59,29 @@ class Bremse:
         self._fehlversuche: dict[str, tuple[int, float]] = {}
 
     def delay_for(self, client: str) -> float:
-        """Wartezeit, die dieser Gegenstelle vor der Antwort zusteht."""
-        now = time.monotonic()
+        """Wartezeit, die dieser Gegenstelle vor der Antwort zusteht.
+
+        Ein unbekannter Absender wartet nie. Wichtig ist die Unterscheidung
+        "kein Eintrag" gegen "alter Eintrag": der Nullpunkt von monotonic()
+        ist beliebig gewaehlt, ein Vergleich gegen 0.0 waere auf einem eben
+        erst gestarteten Rechner etwas voellig anderes als auf einem, der
+        seit Wochen laeuft.
+        """
         with self._lock:
-            count, last = self._fehlversuche.get(client, (0, 0.0))
-            if now - last > self._reset_after:
+            eintrag = self._fehlversuche.get(client)
+            if eintrag is None:
+                return 0.0
+            count, last = eintrag
+            if time.monotonic() - last > self._reset_after:
                 return 0.0
             return min(self._max_delay, 0.1 * (2 ** min(count, 8)))
 
     def note_failure(self, client: str) -> int:
         now = time.monotonic()
         with self._lock:
-            count, last = self._fehlversuche.get(client, (0, 0.0))
-            if now - last > self._reset_after:
-                count = 0
+            eintrag = self._fehlversuche.get(client)
+            count = 0 if eintrag is None or now - eintrag[1] > self._reset_after \
+                else eintrag[0]
             count += 1
             self._fehlversuche[client] = (count, now)
             if len(self._fehlversuche) > self._max_entries:
