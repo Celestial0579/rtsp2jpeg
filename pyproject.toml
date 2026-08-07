@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtsp2jpeg"
+version = "0.1.0"
+description = "RTSP-Kamerabilder als JPEG-Einzelbild ueber HTTP -- fuer die Kamera-URL einer STARFACE-Tuersprechstelle"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["PyYAML>=6.0,<7"]
+
+[project.scripts]
+rtsp2jpeg = "rtsp2jpeg.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Celestial0579/rtsp2jpeg"
+
+[tool.setuptools]
+packages = ["rtsp2jpeg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["integration: braucht Docker und echtes ffmpeg"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "C4", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]

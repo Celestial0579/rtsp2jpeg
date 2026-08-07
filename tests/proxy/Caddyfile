@@ -1,0 +1,16 @@
+# Wie beispiele/internet/Caddyfile, nur ohne TLS und ohne Namen -- fuer den
+# Integrationstest, der keine echte Domain hat.
+{
+    admin off
+    auto_https off
+}
+
+:80 {
+    @erlaubt path /cam/*
+    handle @erlaubt {
+        reverse_proxy rtsp2jpeg:8080
+    }
+    handle {
+        respond "Nicht verfuegbar" 404
+    }
+}
