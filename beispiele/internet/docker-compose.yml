@@ -1,0 +1,53 @@
+# rtsp2jpeg aus dem Internet erreichbar -- noetig, wenn die STARFACE in der
+# Cloud liegt: die Anlage holt das Bild selbst ab und muss dafuer an den
+# Dienst herankommen.
+#
+#   1. Caddyfile anpassen (Name und E-Mail-Adresse)
+#   2. .env anlegen:  RTSP2JPEG_TOKEN=$(openssl rand -hex 24)
+#   3. docker compose up -d
+#
+# In der STARFACE wird dann als Kamera-URL eingetragen:
+#   https://tuerkamera.example.de/cam/tuer.jpg?token=DAS_TOKEN
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"     # fuer die Zertifikatspruefung noetig
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-daten:/data
+      - caddy-config:/config
+      - caddy-log:/var/log/caddy
+    depends_on:
+      - rtsp2jpeg
+
+  rtsp2jpeg:
+    image: ghcr.io/celestial0579/rtsp2jpeg:latest
+    restart: unless-stopped
+    # Kein "ports"-Eintrag: erreichbar ist der Dienst ausschliesslich ueber
+    # Caddy. Damit gibt es keinen ungeschuetzten Weg am TLS vorbei.
+    expose:
+      - "8080"
+    environment:
+      CAMERA_URL: rtsp://${KAMERA_USER}:${KAMERA_PASS}@192.168.1.50:554/stream1
+      CAMERA_NAME: tuer
+      TOKEN: ${RTSP2JPEG_TOKEN:?RTSP2JPEG_TOKEN muss gesetzt sein}
+      # Nur einschalten, weil hier wirklich ein Proxy davorsteht: sonst
+      # koennte jeder seine Herkunft per X-Forwarded-For frei erfinden.
+      TRUST_PROXY: "1"
+      TZ: Europe/Berlin
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy-daten:
+  caddy-config:
+  caddy-log:

@@ -1,0 +1,70 @@
+# rtsp2jpeg -- Beispielkonfiguration
+#
+# Kopieren nach config.yaml und anpassen. Passwoerter gehoeren nicht in diese
+# Datei: ${VARIABLE} wird aus der Umgebung ersetzt (z. B. aus einer .env).
+
+server:
+  host: 0.0.0.0
+  port: 8080
+
+  # Zugangsschutz. STARFACE bietet nur ein einziges URL-Feld an, der Login
+  # muss also in die URL passen. Dafuer gibt es zwei Wege:
+  #
+  #   token       -> https://host/cam/tuer.jpg?token=DEIN_TOKEN
+  #   basic_auth  -> https://benutzer:passwort@host/cam/tuer.jpg
+  #
+  # Empfohlen ist das Token: es funktioniert mit jedem Client, waehrend den
+  # Vorspann "benutzer:passwort@" nicht jeder auswertet.
+  #
+  #   Token erzeugen:  openssl rand -hex 24
+  token: ${RTSP2JPEG_TOKEN:-}
+  # basic_auth: "starface:geheim"
+
+  # /healthz ist absichtlich ohne Token erreichbar, damit Docker und
+  # Ueberwachung nicht das Geheimnis kennen muessen.
+  protect_health: false
+
+  # Nur einschalten, wenn wirklich ein Proxy davorsteht (siehe
+  # beispiele/internet/). Sonst koennte jeder seine Herkunft per
+  # X-Forwarded-For frei erfinden und damit die Bremse gegen das
+  # Durchprobieren von Token umgehen.
+  trust_proxy: false
+
+  log_level: INFO
+  access_log: true
+
+# Gelten fuer alle Kameras und koennen je Kamera ueberschrieben werden.
+defaults:
+  fps: 2               # so viele Bilder holt ffmpeg pro Sekunde
+  quality: 5           # 2 = beste, 31 = schlechteste (ffmpeg -q:v)
+  transport: tcp       # tcp ist bei Tuersprechstellen deutlich stabiler als udp
+  max_age: 5.0         # aelteres Bild gilt als abgestanden
+  timeout: 10.0        # so lange wartet eine Anfrage auf ein frisches Bild
+  read_timeout: 10.0   # so lange wartet ffmpeg auf Daten der Kamera
+  width: 800           # herunterskalieren; Hoehe folgt dem Seitenverhaeltnis
+
+  # Wie lange ffmpeg nach dem letzten Abruf noch verbunden bleibt.
+  #
+  #   0   = dauerhaft verbunden. Das Bild steht sofort bereit (~1 ms).
+  #   > 0 = ffmpeg schlaeft ein und wird beim naechsten Abruf geweckt;
+  #         das erste Bild dauert dann rund 2-3 Sekunden.
+  #
+  # Fuer eine Tuerklingel ist 0 die richtige Wahl: wenn es klingelt, soll
+  # das Bild sofort da sein. Der Preis ist eine dauerhafte Verbindung zur
+  # Kamera und etwas Rechenzeit.
+  idle_timeout: 0
+
+cameras:
+  tuer:
+    url: rtsp://${KAMERA_USER}:${KAMERA_PASS}@192.168.1.50:554/stream1
+
+  # Zweite Kamera, hier bewusst anders eingestellt: der Hof wird nur
+  # gelegentlich angeschaut, da darf ffmpeg zwischendurch schlafen.
+  # hof:
+  #   url: rtsp://192.168.1.51:554/h264Preview_01_sub
+  #   width: 1280
+  #   fps: 1
+  #   rotate: 180
+  #   idle_timeout: 60
+  #   input_args: []
+  #   output_args: []

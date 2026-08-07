@@ -1,0 +1,33 @@
+# Caddy als vorgelagerter Webserver: besorgt selbsttaetig ein
+# Let's-Encrypt-Zertifikat und reicht die Anfragen weiter.
+#
+# Voraussetzungen:
+#   - Der Name zeigt per A-/AAAA-Eintrag auf diesen Rechner.
+#   - Port 80 und 443 sind aus dem Internet erreichbar.
+#
+# Den Namen unten ersetzen. Die E-Mail-Adresse bekommt die Warnung,
+# falls die Verlaengerung eines Zertifikats scheitert.
+
+{
+    email admin@example.de
+}
+
+tuerkamera.example.de {
+    encode zstd gzip
+
+    # Nur das, was STARFACE braucht. Die Statusseiten bleiben draussen --
+    # sie muessen nicht aus dem Internet erreichbar sein.
+    @erlaubt path /cam/*
+    handle @erlaubt {
+        reverse_proxy rtsp2jpeg:8080
+    }
+
+    handle {
+        respond "Nicht verfuegbar" 404
+    }
+
+    log {
+        output file /var/log/caddy/zugriff.log
+        format console
+    }
+}

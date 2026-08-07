@@ -1,0 +1,25 @@
+services:
+  rtsp2jpeg:
+    build: .
+    # Alternativ das gebaute Abbild verwenden:
+    # image: ghcr.io/celestial0579/rtsp2jpeg:latest
+    container_name: rtsp2jpeg
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      CONFIG_FILE: /config/config.yaml
+      # Werte aus .env; nicht in die YAML-Datei schreiben.
+      RTSP2JPEG_TOKEN: ${RTSP2JPEG_TOKEN:-}
+      KAMERA_USER: ${KAMERA_USER:-}
+      KAMERA_PASS: ${KAMERA_PASS:-}
+      TZ: Europe/Berlin
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
