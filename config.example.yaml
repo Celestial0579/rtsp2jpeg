@@ -16,8 +16,13 @@ server:
   # Empfohlen ist das Token: es funktioniert mit jedem Client, waehrend den
   # Vorspann "benutzer:passwort@" nicht jeder auswertet.
   #
-  #   Token erzeugen:  openssl rand -hex 24
-  token: ${RTSP2JPEG_TOKEN:-}
+  #   Token erzeugen:
+  #     docker run --rm ghcr.io/celestial0579/rtsp2jpeg:latest --token-erzeugen
+  #
+  # Ohne 'token' und ohne 'basic_auth' startet der Dienst nicht -- das ist
+  # Absicht. Soll er wirklich offen sein (abgeschottetes Netz), muss das
+  # ausdruecklich dastehen: allow_anonymous: true
+  token: ${RTSP2JPEG_TOKEN}
   # basic_auth: "starface:geheim"
 
   # /healthz ist absichtlich ohne Token erreichbar, damit Docker und
@@ -29,6 +34,9 @@ server:
   # X-Forwarded-For frei erfinden und damit die Bremse gegen das
   # Durchprobieren von Token umgehen.
   trust_proxy: false
+
+  # Nur setzen, wenn der Dienst bewusst ohne jeden Zugangsschutz laufen soll.
+  allow_anonymous: false
 
   log_level: INFO
   access_log: true

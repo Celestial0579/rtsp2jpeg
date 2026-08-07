@@ -137,7 +137,15 @@ class TestLoadConfig:
         """Das mitgelieferte Beispiel muss durchlaufen."""
         config = load_config(
             "config.example.yaml",
-            {"KAMERA_USER": "admin", "KAMERA_PASS": "geheim"},
+            {"KAMERA_USER": "admin", "KAMERA_PASS": "geheim",
+             "RTSP2JPEG_TOKEN": "t" * 48},
         )
         assert "tuer" in config.cameras
         assert config.cameras["tuer"].width == 800
+        assert config.server.token == "t" * 48
+
+    def test_beispielkonfiguration_verlangt_ein_token(self):
+        """Wer das Beispiel ohne Token benutzt, soll das sofort merken."""
+        with pytest.raises(ConfigError, match="RTSP2JPEG_TOKEN"):
+            load_config("config.example.yaml",
+                        {"KAMERA_USER": "a", "KAMERA_PASS": "b"})

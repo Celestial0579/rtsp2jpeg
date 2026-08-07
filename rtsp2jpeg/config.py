@@ -83,6 +83,7 @@ class ServerConfig:
     basic_auth: str | None = None       # "benutzer:passwort"
     protect_health: bool = False        # /healthz standardmaessig ohne Token
     trust_proxy: bool = False           # X-Forwarded-For fuers Protokoll auswerten
+    allow_anonymous: bool = False       # Betrieb ganz ohne Zugangsschutz zulassen
     log_level: str = "INFO"
     access_log: bool = True
 
@@ -246,6 +247,10 @@ def load_config(path: str | None = None, environ: dict[str, str] | None = None) 
         server_raw["basic_auth"] = env["BASIC_AUTH"] or None
     if "TRUST_PROXY" in env:
         server_raw["trust_proxy"] = env["TRUST_PROXY"].lower() in ("1", "true", "ja", "yes")
+    if "ALLOW_ANONYMOUS" in env:
+        server_raw["allow_anonymous"] = env["ALLOW_ANONYMOUS"].lower() in (
+            "1", "true", "ja", "yes"
+        )
     if "LOG_LEVEL" in env:
         server_raw["log_level"] = env["LOG_LEVEL"]
     server = _server_from(server_raw)
