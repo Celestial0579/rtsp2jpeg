@@ -23,14 +23,18 @@ jobs:
 
   integration:
     name: Integrationstest mit echter RTSP-Quelle
-    runs-on: ubuntu-latest
+    # Braucht den Docker-Daemon; nur der Laeufer mit der Marke
+    # docker-socket haengt den Socket ein (Laeufer 1 und 2 nicht).
+    runs-on: docker-socket
     steps:
       - uses: actions/checkout@v4
       - run: scripts/integrationstest.sh
 
   image:
     name: Abbild bauen und veroeffentlichen
-    runs-on: ubuntu-latest
+    # Braucht den Docker-Daemon; nur der Laeufer mit der Marke
+    # docker-socket haengt den Socket ein (Laeufer 1 und 2 nicht).
+    runs-on: docker-socket
     needs: [test, integration]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
