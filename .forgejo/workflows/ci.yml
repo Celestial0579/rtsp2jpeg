@@ -46,8 +46,15 @@ jobs:
       - uses: docker/login-action@v3
         with:
           registry: git.firestrike.de
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # Das automatische Token authentifiziert zwar, darf aber keine
+          # Pakete schreiben (401 reqPackageAccess beim Hochladen): Forgejo
+          # fuehrt Ablaeufe unter einem eigenen Aktions-Benutzer aus und gibt
+          # Schreibrechte auf einen benutzereigenen Paket-Namensraum nur dem
+          # Benutzer selbst. PAKET_TOKEN traegt genau ein Recht:
+          # write:package. Auf GitHub greift statt dessen der Block
+          # permissions.packages weiter unten.
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.PAKET_TOKEN }}
       # Der Kontoname wird bei GitHub so geschrieben, wie er angelegt wurde;
       # ein Abbildname muss dagegen durchgehend klein sein.
       - name: Kontonamen kleinschreiben
