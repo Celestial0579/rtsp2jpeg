@@ -47,8 +47,8 @@ services:
   # Bildet den Internet-Aufbau nach: die Anlage kommt nur ueber den
   # vorgelagerten Webserver an den Dienst heran.
   proxy:
-    image: caddy:2-alpine
+    # Gebaut statt eingehaengt -- die Begruendung steht in
+    # tests/proxy/Dockerfile.
+    build: ./tests/proxy
     depends_on:
       - rtsp2jpeg
-    volumes:
-      - ./tests/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
