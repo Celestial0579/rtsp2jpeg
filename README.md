@@ -250,6 +250,9 @@ nötig:
 scripts/integrationstest.sh
 ```
 
+Dasselbe läuft als GitHub-CI. Auf `main` veröffentlicht sie das Abbild als
+`ghcr.io/celestial0579/rtsp2jpeg`; Pull Requests bauen es nur.
+
 ## Was ungetestet ist
 
 Alles bis zur HTTP-Schnittstelle ist automatisch geprüft, einschließlich des
