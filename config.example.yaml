@@ -23,8 +23,9 @@ server:
   # Absicht. Soll er wirklich offen sein (abgeschottetes Netz), muss das
   # ausdruecklich dastehen: allow_anonymous: true
   #
-  # Zu schwach startet ebenfalls nicht: Token unter 24 Zeichen, Passwort in
-  # basic_auth unter 16 Zeichen, Leerraum am Anfang oder Ende.
+  # Zu schwach startet ebenfalls nicht: Token unter 24 Zeichen oder mit
+  # anderen Zeichen als A-Z a-z 0-9 - _ . ~, Passwort in basic_auth unter
+  # 16 Zeichen, Leerraum am Anfang oder Ende.
   token: ${RTSP2JPEG_TOKEN}
   # basic_auth: "starface:${STARFACE_PASSWORT}"
 

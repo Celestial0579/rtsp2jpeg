@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -89,7 +90,7 @@ class ServerConfig:
     basic_auth: str | None = None       # "benutzer:passwort"
     # Adressen des eigenen Proxys: nur von dort zaehlt X-Forwarded-For.
     trust_proxy: tuple[ipaddress.IPv4Network, ...] = ()
-    # Nur diese Gegenstellen werden bedient; leer heisst: alle.
+    # Nur diese Gegenstellen werden bedient; nicht gesetzt heisst: alle.
     allow_from: tuple[ipaddress.IPv4Network, ...] = ()
     allow_anonymous: bool = False       # Betrieb ganz ohne Zugangsschutz zulassen
     log_level: str = "INFO"
@@ -114,12 +115,16 @@ def im_netz(adresse: str, netze: Netze) -> bool:
     return any(ip in netz for netz in netze)
 
 
-def netze(value: Any, key: str, *, ganz_offen: bool = True) -> Netze:
+def netze(value: Any, key: str, *, ganz_offen: bool = True,
+          leer_erlaubt: bool = True) -> Netze:
     """Adressen und Netze aus Text (``"a, b"``) oder einer Liste davon.
 
     Ohne Praefix ist eine einzelne Adresse gemeint. Hostbits im Netz
     (``10.0.0.5/24``) gelten als Tippfehler und verhindern den Start.
+    Mit ``leer_erlaubt=False`` verhindert auch eine leere Angabe den Start.
     """
+    if not leer_erlaubt and value in (None, False, "", []):
+        raise _leer(key)
     if value is None or value is False:
         return ()
     if isinstance(value, str):
@@ -146,7 +151,16 @@ def netze(value: Any, key: str, *, ganz_offen: bool = True) -> Netze:
                 f"{key}: {teil!r} umfasst alle Adressen -- der Dienst startet nicht"
             )
         ergebnis.append(netz)
+    if not ergebnis and not leer_erlaubt:
+        raise _leer(key)
     return tuple(ergebnis)
+
+
+def _leer(key: str) -> ConfigError:
+    return ConfigError(
+        f"{key} ist gesetzt, aber leer -- ohne Einschraenkung die Einstellung "
+        f"weglassen, sonst Adressen angeben. Der Dienst startet nicht"
+    )
 
 
 _TRUST_PROXY_TRUE = (
@@ -254,6 +268,10 @@ def _coerce_camera(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> 
                 f"Kamera {name!r}: {key!r} erwartet {want.__name__}, "
                 f"bekam {value!r}"
             ) from exc
+        if want is float and not math.isfinite(values[key]):
+            raise ConfigError(
+                f"Kamera {name!r}: {key!r} muss eine endliche Zahl sein, ist {value!r}"
+            )
 
     url = values["url"]
     if not url.startswith(("rtsp://", "rtsps://", "http://", "https://")):
@@ -353,6 +371,8 @@ def _server_from(raw: dict[str, Any]) -> ServerConfig:
     if unknown:
         raise ConfigError(f"server: unbekannte Einstellung(en) {sorted(unknown)}")
 
+    if "allow_from" in raw and raw["allow_from"] is None:
+        raise _leer("server.allow_from")
     values = {k: v for k, v in raw.items() if v is not None}
     for key, value in values.items():
         if key in _SERVER_NETZE:
@@ -361,7 +381,8 @@ def _server_from(raw: dict[str, Any]) -> ServerConfig:
             if key == "trust_proxy" and value is True:
                 raise ConfigError(f"server.{_TRUST_PROXY_TRUE}")
             values[key] = netze(value, f"server.{key}",
-                                ganz_offen=key != "trust_proxy")
+                                ganz_offen=key != "trust_proxy",
+                                leer_erlaubt=key != "allow_from")
             continue
         _check_type(key, value, _SERVER_FIELDS[key])
 
@@ -439,7 +460,8 @@ def load_config(path: str | None = None, environ: dict[str, str] | None = None) 
         else:
             server_raw["trust_proxy"] = netze(wert, "TRUST_PROXY", ganz_offen=False)
     if "ALLOW_FROM" in env:
-        server_raw["allow_from"] = netze(env["ALLOW_FROM"], "ALLOW_FROM")
+        server_raw["allow_from"] = netze(env["ALLOW_FROM"], "ALLOW_FROM",
+                                         leer_erlaubt=False)
     if "ALLOW_ANONYMOUS" in env:
         server_raw["allow_anonymous"] = _env_switch("ALLOW_ANONYMOUS", env["ALLOW_ANONYMOUS"])
     if "LOG_LEVEL" in env:

@@ -52,6 +52,9 @@ class TestFehltDerZugangsschutz:
     def test_mit_basic_auth_in_ordnung(self):
         assert fehlt_der_zugangsschutz(baue(basic_auth="u:" + "p" * 16)) is None
 
+    def test_url_sichere_zeichen_genuegen(self):
+        assert fehlt_der_zugangsschutz(baue(token="Ab9-_.~" * 4)) is None
+
     def test_token_mit_genau_24_zeichen_genuegt(self):
         assert fehlt_der_zugangsschutz(baue(token="a" * 24)) is None
 
@@ -63,6 +66,10 @@ class TestFehltDerZugangsschutz:
         ({"basic_auth": "u:" + "p" * 16 + "\n"}, "Leerraum"),
         ({"token": "a" * 48, "basic_auth": "u:kurz"}, "basic_auth ist zu kurz"),
         ({"token": "kurz", "allow_anonymous": True}, "Token ist zu kurz"),
+        ({"token": "a" * 30 + "+b"}, "nicht unveraendert"),
+        ({"token": "a" * 30 + " b"}, "nicht unveraendert"),
+        ({"token": "a" * 30 + "%2B"}, "nicht unveraendert"),
+        ({"token": "a" * 30 + "&b=c"}, "nicht unveraendert"),
     ])
     def test_zu_schwach_startet_nicht(self, kwargs, muster):
         grund = fehlt_der_zugangsschutz(baue(**kwargs))
