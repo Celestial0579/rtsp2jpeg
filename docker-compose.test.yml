@@ -52,6 +52,19 @@ services:
     build: ./tests/proxy
     depends_on:
       - rtsp2jpeg
+    # Eingeschraenkt wie im Internet-Beispiel; ohne Zertifikate genuegt
+    # fuer /data und /config ein tmpfs.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /data
+      - /config
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
     networks:
       default:
         # Feste Adresse: rtsp2jpeg vertraut X-Forwarded-For nur von hier.
