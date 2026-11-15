@@ -65,7 +65,7 @@ class CameraConfig:
     transport: str = "tcp"     # tcp ist bei Tuersprechstellen deutlich stabiler
     idle_timeout: float = 60.0  # 0 = ffmpeg laeuft dauerhaft
     max_age: float = 5.0       # aelteres Standbild gilt als abgestanden
-    timeout: float = 10.0      # so lange wartet eine Anfrage auf ein Bild
+    timeout: float = 3.0       # so lange wartet eine Anfrage auf ein Bild
     read_timeout: float = 10.0  # so lange wartet ffmpeg auf Daten der Kamera
     rotate: int = 0            # 0, 90, 180 oder 270 Grad
     input_args: list[str] = field(default_factory=list)
@@ -286,7 +286,7 @@ def _coerce_camera(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> 
             f"Kamera {name!r}: 'rotate' muss 0, 90, 180 oder 270 sein, ist {rotate}"
         )
 
-    timeout = values.get("timeout", 10.0)
+    timeout = values.get("timeout", CameraConfig.timeout)
     if not 0 < timeout <= MAX_CAMERA_TIMEOUT:
         raise ConfigError(
             f"Kamera {name!r}: 'timeout' muss groesser 0 und hoechstens "
