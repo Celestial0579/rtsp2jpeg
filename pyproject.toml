@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rtsp2jpeg"
-version = "0.1.0"
+version = "0.2.0"
 description = "RTSP-Kamerabilder als JPEG-Einzelbild ueber HTTP -- fuer die Kamera-URL einer STARFACE-Tuersprechstelle"
 readme = "README.md"
 requires-python = ">=3.10"

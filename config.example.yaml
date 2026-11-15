@@ -25,17 +25,14 @@ server:
   token: ${RTSP2JPEG_TOKEN}
   # basic_auth: "starface:geheim"
 
-  # /healthz ist absichtlich ohne Token erreichbar, damit Docker und
-  # Ueberwachung nicht das Geheimnis kennen muessen.
-  protect_health: false
-
   # Nur einschalten, wenn wirklich ein Proxy davorsteht (siehe
   # beispiele/internet/). Sonst koennte jeder seine Herkunft per
-  # X-Forwarded-For frei erfinden und damit die Bremse gegen das
-  # Durchprobieren von Token umgehen.
+  # X-Forwarded-For frei erfinden.
   trust_proxy: false
 
   # Nur setzen, wenn der Dienst bewusst ohne jeden Zugangsschutz laufen soll.
+  # Schalter sind echte Wahrheitswerte: true oder false, ohne
+  # Anfuehrungszeichen. Text wie "false" oder ${VARIABLE} lehnt der Dienst ab.
   allow_anonymous: false
 
   log_level: INFO
@@ -47,7 +44,7 @@ defaults:
   quality: 5           # 2 = beste, 31 = schlechteste (ffmpeg -q:v)
   transport: tcp       # tcp ist bei Tuersprechstellen deutlich stabiler als udp
   max_age: 5.0         # aelteres Bild gilt als abgestanden
-  timeout: 10.0        # so lange wartet eine Anfrage auf ein frisches Bild
+  timeout: 10.0        # so lange wartet eine Anfrage auf ein Bild (max. 30)
   read_timeout: 10.0   # so lange wartet ffmpeg auf Daten der Kamera
   width: 800           # herunterskalieren; Hoehe folgt dem Seitenverhaeltnis
 

@@ -163,7 +163,7 @@ class TestGrabber:
         try:
             with pytest.raises(TimeoutError):
                 grabber.get_frame()
-            assert "nicht startbar" in (grabber.status()["last_error"] or "")
+            assert "nicht startbar" in (grabber.last_error or "")
         finally:
             grabber.stop()
 
@@ -175,9 +175,9 @@ class TestGrabber:
         try:
             grabber.get_frame()
             deadline = time.monotonic() + 8.0
-            while grabber.status()["restarts"] == 0 and time.monotonic() < deadline:
+            while grabber.restarts == 0 and time.monotonic() < deadline:
                 time.sleep(0.1)
-            assert grabber.status()["restarts"] >= 1
+            assert grabber.restarts >= 1
             assert is_jpeg(grabber.get_frame(max_age=10.0).data)
         finally:
             grabber.stop()
@@ -190,15 +190,21 @@ class TestGrabber:
         finally:
             grabber.stop()
 
-    def test_ffmpeg_meldungen_landen_im_status(self, fake_ffmpeg, monkeypatch):
-        monkeypatch.setenv("FAKE_STDERR", "Connection refused")
-        grabber = Grabber(camera(), ffmpeg=fake_ffmpeg)
+    def test_ffmpeg_meldungen_werden_geschwaerzt(self, fake_ffmpeg, monkeypatch, caplog):
+        """ffmpeg nennt die volle Kamera-URL -- das Passwort darf nirgends bleiben."""
+        url = "rtsp://admin:streng-geheim@host/s"
+        monkeypatch.setenv("FAKE_STDERR", f"{url}: Connection refused")
+        grabber = Grabber(camera(url=url), ffmpeg=fake_ffmpeg)
         try:
-            grabber.get_frame()
-            deadline = time.monotonic() + 2.0
-            while not grabber.status()["ffmpeg_log"] and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert "Connection refused" in " ".join(grabber.status()["ffmpeg_log"])
+            with caplog.at_level("DEBUG"):
+                grabber.get_frame()
+                deadline = time.monotonic() + 2.0
+                while not grabber._stderr and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            gesammelt = " ".join(grabber._stderr)
+            assert "Connection refused" in gesammelt
+            assert "streng-geheim" not in gesammelt
+            assert "streng-geheim" not in caplog.text
         finally:
             grabber.stop()
 
@@ -207,15 +213,15 @@ class TestGrabber:
         try:
             grabber.start()
             time.sleep(0.4)
-            assert grabber.status()["running"] is False, "ohne Abruf kein ffmpeg"
+            assert grabber.running is False, "ohne Abruf kein ffmpeg"
 
             grabber.get_frame()
-            assert grabber.status()["running"] is True
+            assert grabber.running is True
 
             deadline = time.monotonic() + 6.0
-            while grabber.status()["running"] and time.monotonic() < deadline:
+            while grabber.running and time.monotonic() < deadline:
                 time.sleep(0.1)
-            assert grabber.status()["running"] is False, "Leerlauf beendet ffmpeg nicht"
+            assert grabber.running is False, "Leerlauf beendet ffmpeg nicht"
 
             # und auf Anfrage wieder aufwachen
             assert is_jpeg(grabber.get_frame().data)
@@ -227,26 +233,9 @@ class TestGrabber:
         try:
             grabber.get_frame()
             deadline = time.monotonic() + 6.0
-            while grabber.status()["running"] and time.monotonic() < deadline:
+            while grabber.running and time.monotonic() < deadline:
                 time.sleep(0.1)
-            assert grabber.status()["restarts"] == 0
-        finally:
-            grabber.stop()
-
-    def test_gesundheit_ohne_anfrage_ist_in_ordnung(self, fake_ffmpeg):
-        grabber = Grabber(camera(idle_timeout=30), ffmpeg=fake_ffmpeg)
-        assert grabber.is_healthy(), "eine schlafende Kamera ist nicht krank"
-
-    def test_stream_liefert_fortlaufend_neue_bilder(self, fake_ffmpeg):
-        grabber = Grabber(camera(), ffmpeg=fake_ffmpeg)
-        try:
-            gesehen = []
-            for frame in grabber.stream(timeout=5.0):
-                gesehen.append(frame.data)
-                if len(gesehen) == 3:
-                    break
-            assert len(set(gesehen)) == 3
-            assert all(is_jpeg(f) for f in gesehen)
+            assert grabber.restarts == 0
         finally:
             grabber.stop()
 
@@ -258,8 +247,28 @@ class TestGrabber:
         grabber.stop()
         assert process.poll() is not None, "ffmpeg laeuft nach stop() weiter"
 
-    def test_passwort_taucht_im_status_nicht_auf(self, fake_ffmpeg):
+    def test_kein_passwort_im_protokoll(self, fake_ffmpeg, caplog):
+        """Auch auf DEBUG-Stufe nicht, wo die ffmpeg-Befehlszeile erscheint."""
         grabber = Grabber(
             camera(url="rtsp://admin:streng-geheim@host/s"), ffmpeg=fake_ffmpeg
         )
-        assert "streng-geheim" not in str(grabber.status())
+        try:
+            with caplog.at_level("DEBUG"):
+                grabber.get_frame()
+        finally:
+            grabber.stop()
+        assert "rtsp://admin:***@host/s" in caplog.text
+        assert "streng-geheim" not in caplog.text
+
+    def test_fehlermeldung_enthaelt_keine_kameradetails(self, fake_ffmpeg, monkeypatch):
+        monkeypatch.setenv("FAKE_START_DELAY", "30")
+        monkeypatch.setenv("FAKE_STDERR", "rtsp://a:streng-geheim@h/s: 401 Unauthorized")
+        grabber = Grabber(camera(url="rtsp://a:streng-geheim@h/s", timeout=0.6),
+                          ffmpeg=fake_ffmpeg)
+        try:
+            with pytest.raises(TimeoutError) as fehler:
+                grabber.get_frame()
+        finally:
+            grabber.stop()
+        assert "streng-geheim" not in str(fehler.value)
+        assert "401" not in str(fehler.value)

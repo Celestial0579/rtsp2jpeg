@@ -15,8 +15,8 @@
 tuerkamera.example.de {
     encode zstd gzip
 
-    # Nur das, was STARFACE braucht. Die Statusseiten bleiben draussen --
-    # sie muessen nicht aus dem Internet erreichbar sein.
+    # Nur das, was STARFACE braucht. rtsp2jpeg kennt ohnehin nichts
+    # anderes; Caddy grenzt zusaetzlich ab.
     @erlaubt path /cam/*
     handle @erlaubt {
         reverse_proxy rtsp2jpeg:8080

@@ -3,6 +3,10 @@
 Macht aus einer RTSP-Kamera ein einzelnes JPEG, das per HTTP abrufbar ist —
 gedacht für das Feld **Kamera-URL** einer STARFACE-Türsprechstelle.
 
+Der Dienst kann genau eines: auf `GET /cam/<name>.jpg` das aktuelle Bild
+ausliefern. Status-, Übersichts- und Stromseiten gibt es nicht — so bleibt
+die Angriffsfläche so klein wie möglich.
+
 ## Wozu das gut ist
 
 STARFACE zeigt beim Klingeln ein Bild der Türsprechstelle an. Dafür trägt man
@@ -126,36 +130,33 @@ docker compose up -d
 
 Dabei gilt:
 
-- **Nur `/cam/*` wird nach außen gereicht.** Die Status- und Übersichtsseiten
-  bleiben innen, sie werden von der Anlage nicht gebraucht.
+- **Nur `/cam/*` wird nach außen gereicht.** Der Dienst selbst kennt
+  ohnehin nichts anderes; Caddy grenzt zusätzlich ab.
 - **Immer HTTPS.** Ohne TLS steht das Token bei jedem Abruf im Klartext im
   Netz.
-- **`trust_proxy` nur mit echtem Proxy davor.** Andernfalls könnte jeder seine
-  Herkunft per `X-Forwarded-For` frei erfinden und damit die Bremse gegen das
-  Durchprobieren von Token umgehen.
-- Wiederholte Fehlversuche werden verzögert beantwortet (ansteigend bis zwei
-  Sekunden je Anfrage), damit ein Token nicht durchprobiert werden kann.
+- **`trust_proxy` nur mit echtem Proxy davor.** Ausgewertet wird der letzte
+  Eintrag in `X-Forwarded-For` — den hängt der eigene Proxy an. Ohne Proxy
+  könnte jeder seine Herkunft frei erfinden.
+- Nach einem Fehlversuch prüft der Dienst weitere Versuche derselben
+  Gegenstelle erst nach einer Wartezeit (ansteigend bis zwei Sekunden), auch
+  wenn sie gleichzeitig eintreffen.
 
-## Endpunkte
+## Schnittstelle
 
-| Pfad | Zweck |
+| Anfrage | Antwort |
 |---|---|
-| `/cam/<name>.jpg` | aktuelles Einzelbild — **das ist die Kamera-URL** |
-| `/cam/<name>.mjpg` | fortlaufender MJPEG-Strom (Browser, andere Systeme; **nicht** für STARFACE) |
-| `/healthz` | Zustand als JSON, ohne Token erreichbar |
-| `/status` | ausführlicher Zustand je Kamera, inkl. der letzten ffmpeg-Meldungen |
-| `/` | Übersichtsseite mit allen Kameras |
+| `GET /cam/<name>.jpg` | aktuelles Einzelbild — **das ist die Kamera-URL** |
+| alles andere | leere Fehlerantwort (`401`, `404`, `405` oder `400`) |
 
-Am Einzelbild-Endpunkt lassen sich Werte pro Abruf überschreiben:
-
-| Parameter | Bedeutung |
-|---|---|
-| `max_age=2` | Bild darf höchstens 2 s alt sein |
-| `timeout=5` | höchstens 5 s auf ein Bild warten |
-| `stale=1` | lieber ein altes Bild liefern als einen Fehler |
-
-`stale=1` ist nützlich, wenn im Callmanager statt eines Fehlersymbols besser
-das letzte bekannte Bild erscheinen soll.
+- Jede Verbindung trägt genau eine Anfrage und wird danach geschlossen.
+- Nur `GET`, ohne Rumpf. Andere Methoden und Anfragen mit Rumpf weist der
+  Dienst ab.
+- Fehlerantworten haben keinen Inhalt — auch keine Meldung der Kamera.
+- Feste Grenzen: 5 s je Lese- oder Schreibvorgang, eine Höchstdauer je
+  Verbindung, höchstens 32 gleichzeitige Verbindungen, 8 KiB für
+  Anfragezeile und Kopfzeilen.
+- Liefert die Kamera innerhalb von `timeout` kein Bild, antwortet der Dienst
+  mit einem leeren `503`.
 
 ## Konfiguration
 
@@ -172,7 +173,7 @@ Alles Weitere steht kommentiert in
 | `transport` | tcp | `tcp` ist bei Türsprechstellen deutlich stabiler als `udp` |
 | `idle_timeout` | 60 | Sekunden ohne Abruf, bis ffmpeg einschläft; `0` = dauerhaft |
 | `max_age` | 5.0 | ab wann ein Bild als abgestanden gilt |
-| `timeout` | 10.0 | wie lange eine Anfrage auf ein Bild wartet |
+| `timeout` | 10.0 | wie lange eine Anfrage auf ein Bild wartet (höchstens 30) |
 | `read_timeout` | 10.0 | wie lange ffmpeg auf Daten der Kamera wartet |
 
 Auf der Serverseite:
@@ -182,8 +183,14 @@ Auf der Serverseite:
 | `token` | — | Zugangstoken für `?token=…` |
 | `basic_auth` | — | `benutzer:passwort` für den URL-Vorspann |
 | `allow_anonymous` | false | Betrieb ganz ohne Zugangsschutz zulassen |
-| `protect_health` | false | auch `/healthz` hinter den Zugangsschutz stellen |
 | `trust_proxy` | false | `X-Forwarded-For` auswerten — nur mit echtem Proxy davor |
+| `access_log` | true | jeden Abruf protokollieren (ohne Abfrageteil der URL) |
+
+Schalter wie `allow_anonymous` müssen echte Wahrheitswerte sein: `true` oder
+`false` ohne Anführungszeichen. Text wie `"false"` — auch aus einer
+`${VARIABLE}` — lehnt der Dienst ab und startet nicht. In der Umgebung gelten
+`1`/`true`/`yes` und `0`/`false`/`no`; alles andere verhindert ebenfalls den
+Start.
 
 Passwörter gehören nicht in die Datei — `${VARIABLE}` wird aus der Umgebung
 ersetzt, `${VARIABLE:-vorgabe}` mit Rückfallwert.
@@ -204,11 +211,11 @@ gelegentlich angeschaut wird, lohnt der Schlafmodus dagegen.
 
 ## Betrieb
 
-Bei Störungen zeigt `/status` je Kamera den Zustand und die letzten
-ffmpeg-Meldungen — dort steht in aller Regel schon die Ursache:
+Bei Störungen steht die Ursache im Protokoll des Containers; mit
+`LOG_LEVEL=DEBUG` erscheinen auch die Meldungen von ffmpeg:
 
 ```bash
-curl -s http://localhost:8080/status | jq
+docker logs rtsp2jpeg
 ```
 
 Häufige Fälle:
@@ -227,8 +234,10 @@ Kamera. Zum Ausprobieren:
 ffprobe "rtsp://benutzer:passwort@192.168.1.50:554/stream1"
 ```
 
-Passwörter tauchen weder in den Protokollen noch unter `/status` auf; das
-Token wird im Zugriffsprotokoll durch `token=***` ersetzt.
+Kamera-Passwörter werden in allen Protokollzeilen geschwärzt, auch in
+Meldungen von ffmpeg. Das Zugriffsprotokoll enthält nur den Pfad, nie den
+Abfrageteil mit dem Token. Der Docker-Healthcheck prüft nur, ob der Dienst
+Verbindungen annimmt.
 
 ## Entwicklung
 
@@ -239,7 +248,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 ```
 
 Die Unittests kommen ohne Kamera und ohne ffmpeg aus — ein Ersatzprogramm
-liefert stattdessen einen MJPEG-Strom.
+liefert stattdessen die Bilder.
 
 Der Integrationstest braucht Docker und stellt sich seine Kamera selbst hin
 (mediamtx als RTSP-Server, ein ffmpeg-Testbild als Klingel, Caddy als
