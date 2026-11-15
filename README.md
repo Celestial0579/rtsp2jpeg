@@ -75,6 +75,11 @@ docker compose up -d
 Die URL endet bewusst auf `.jpg` — STARFACE prüft das Format, und ein Pfad
 ohne diese Endung ist eine häufige Fehlerquelle.
 
+Der Knopf **Verbindung testen** ruft die URL im Browser des Admin-Rechners ab,
+nicht in der Anlage. Ob die STARFACE selbst an den Dienst herankommt, zeigt
+erst ein Anruf. Beim Klingeln wartet die Anlage höchstens 5 s auf jedes Bild;
+deshalb steht `timeout` auf 3 s.
+
 ### Der Login muss in die URL
 
 STARFACE bietet nur ein einziges URL-Feld, kein getrenntes Feld für Benutzer
@@ -101,6 +106,10 @@ docker run --rm ghcr.io/celestial0579/rtsp2jpeg:latest --token-erzeugen --host t
 Das ist Absicht. Eine Warnzeile im Protokoll übersieht man, und das Bild der
 eigenen Haustür gehört nicht ins offene Netz. Fehlen `token` und `basic_auth`,
 bricht der Start mit einer Anleitung ab und Exit-Code 3.
+
+Ebenso, wenn der Zugang zu schwach ist: ein Token unter 24 Zeichen, ein
+Passwort in `basic_auth` unter 16 Zeichen oder Leerraum am Anfang oder Ende
+(meist ein Zeilenende aus einer `.env`-Datei).
 
 Soll der Dienst wirklich ohne Schutz laufen — etwa in einem abgeschotteten
 Netz, in dem er ohnehin niemand erreicht —, muss das ausdrücklich dastehen:
@@ -134,12 +143,20 @@ Dabei gilt:
   ohnehin nichts anderes; Caddy grenzt zusätzlich ab.
 - **Immer HTTPS.** Ohne TLS steht das Token bei jedem Abruf im Klartext im
   Netz.
-- **`trust_proxy` nur mit echtem Proxy davor.** Ausgewertet wird der letzte
-  Eintrag in `X-Forwarded-For` — den hängt der eigene Proxy an. Ohne Proxy
-  könnte jeder seine Herkunft frei erfinden.
-- Nach einem Fehlversuch prüft der Dienst weitere Versuche derselben
-  Gegenstelle erst nach einer Wartezeit (ansteigend bis zwei Sekunden), auch
-  wenn sie gleichzeitig eintreffen.
+- **`trust_proxy` nennt die Adresse des Proxys**, nicht bloß `true`.
+  `X-Forwarded-For` zählt nur bei Verbindungen von dort, und zwar der letzte
+  Eintrag — den hängt der eigene Proxy an. Wer am Proxy vorbei direkt kommt,
+  zählt mit seiner echten Adresse. Das Beispiel gibt Caddy dafür eine feste
+  Adresse.
+- **`allow_from` schließt alle anderen aus.** Im Beispiel darf nur Caddy
+  verbinden; im LAN genügt die Adresse der STARFACE. Andere Verbindungen
+  schließt der Dienst, bevor er etwas liest.
+- **Kein Zugriffsprotokoll mit Abfrageteil.** Das Token steht in der URL.
+  Das Caddy-Beispiel schreibt deshalb kein Zugriffsprotokoll; jeder andere
+  vorgelagerte Proxy muss die URL ebenso behandeln.
+- Nach einem Fehlversuch ist die Gegenstelle für eine kurze Frist gesperrt
+  (ansteigend bis zwei Sekunden): Versuche in dieser Zeit prüft der Dienst
+  nicht, sondern weist sie sofort ab, auch wenn sie gleichzeitig eintreffen.
 
 ## Schnittstelle
 
@@ -152,11 +169,13 @@ Dabei gilt:
 - Nur `GET`, ohne Rumpf. Andere Methoden und Anfragen mit Rumpf weist der
   Dienst ab.
 - Fehlerantworten haben keinen Inhalt — auch keine Meldung der Kamera.
-- Feste Grenzen: 5 s je Lese- oder Schreibvorgang, eine Höchstdauer je
-  Verbindung, höchstens 32 gleichzeitige Verbindungen, 8 KiB für
-  Anfragezeile und Kopfzeilen.
+- Feste Grenzen: 2 s bis Anfragezeile und Kopfzeilen vollständig sind,
+  5 s je Lese- oder Schreibvorgang, eine Höchstdauer je Verbindung, 8 KiB
+  für Anfragezeile und Kopfzeilen, höchstens 32 gleichzeitige Verbindungen
+  und davon 8 je Adresse (der Proxy aus `trust_proxy` ausgenommen).
 - Liefert die Kamera innerhalb von `timeout` kein Bild, antwortet der Dienst
-  mit einem leeren `503`.
+  mit einem leeren `503`. Ist ffmpeg bereits ohne Bild ausgestiegen (Kamera
+  aus oder nicht erreichbar), kommt das `503` sofort.
 
 ## Konfiguration
 
@@ -173,7 +192,7 @@ Alles Weitere steht kommentiert in
 | `transport` | tcp | `tcp` ist bei Türsprechstellen deutlich stabiler als `udp` |
 | `idle_timeout` | 60 | Sekunden ohne Abruf, bis ffmpeg einschläft; `0` = dauerhaft |
 | `max_age` | 5.0 | ab wann ein Bild als abgestanden gilt |
-| `timeout` | 10.0 | wie lange eine Anfrage auf ein Bild wartet (höchstens 30) |
+| `timeout` | 3.0 | wie lange eine Anfrage auf ein Bild wartet (höchstens 30); die STARFACE wartet höchstens 5 s |
 | `read_timeout` | 10.0 | wie lange ffmpeg auf Daten der Kamera wartet |
 
 Auf der Serverseite:
@@ -183,8 +202,13 @@ Auf der Serverseite:
 | `token` | — | Zugangstoken für `?token=…` |
 | `basic_auth` | — | `benutzer:passwort` für den URL-Vorspann |
 | `allow_anonymous` | false | Betrieb ganz ohne Zugangsschutz zulassen |
-| `trust_proxy` | false | `X-Forwarded-For` auswerten — nur mit echtem Proxy davor |
+| `trust_proxy` | — | Adresse(n) des eigenen Proxys; nur von dort zählt `X-Forwarded-For` |
+| `allow_from` | — | nur diese Adressen oder Netze bedienen, alle anderen sofort trennen |
 | `access_log` | true | jeden Abruf protokollieren (ohne Abfrageteil der URL) |
+
+`trust_proxy` und `allow_from` nehmen IPv4-Adressen oder Netze, in der Datei
+als Liste, in der Umgebung (`TRUST_PROXY`, `ALLOW_FROM`) durch Kommas
+getrennt, etwa `172.29.80.200` oder `10.0.0.0/24`.
 
 Schalter wie `allow_anonymous` müssen echte Wahrheitswerte sein: `true` oder
 `false` ohne Anführungszeichen. Text wie `"false"` — auch aus einer

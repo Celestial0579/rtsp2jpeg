@@ -16,3 +16,7 @@ updates:
     directory: /tests/proxy
     schedule:
       interval: weekly
+  - package-ecosystem: docker-compose
+    directories: ["/", "/beispiele/internet"]
+    schedule:
+      interval: weekly

@@ -22,13 +22,20 @@ server:
   # Ohne 'token' und ohne 'basic_auth' startet der Dienst nicht -- das ist
   # Absicht. Soll er wirklich offen sein (abgeschottetes Netz), muss das
   # ausdruecklich dastehen: allow_anonymous: true
+  #
+  # Zu schwach startet ebenfalls nicht: Token unter 24 Zeichen, Passwort in
+  # basic_auth unter 16 Zeichen, Leerraum am Anfang oder Ende.
   token: ${RTSP2JPEG_TOKEN}
-  # basic_auth: "starface:geheim"
+  # basic_auth: "starface:${STARFACE_PASSWORT}"
 
-  # Nur einschalten, wenn wirklich ein Proxy davorsteht (siehe
-  # beispiele/internet/). Sonst koennte jeder seine Herkunft per
-  # X-Forwarded-For frei erfinden.
-  trust_proxy: false
+  # Adresse(n) des eigenen Proxys (siehe beispiele/internet/). Nur von dort
+  # wertet der Dienst X-Forwarded-For aus; alle anderen Gegenstellen zaehlen
+  # mit ihrer echten Adresse. Ein blosses true startet nicht.
+  # trust_proxy: 172.29.80.200
+
+  # Nur diese Gegenstellen bedienen, etwa die STARFACE oder den Proxy;
+  # alle anderen Verbindungen schliesst der Dienst sofort. Leer = alle.
+  # allow_from: [192.168.1.20]
 
   # Nur setzen, wenn der Dienst bewusst ohne jeden Zugangsschutz laufen soll.
   # Schalter sind echte Wahrheitswerte: true oder false, ohne
@@ -44,7 +51,8 @@ defaults:
   quality: 5           # 2 = beste, 31 = schlechteste (ffmpeg -q:v)
   transport: tcp       # tcp ist bei Tuersprechstellen deutlich stabiler als udp
   max_age: 5.0         # aelteres Bild gilt als abgestanden
-  timeout: 10.0        # so lange wartet eine Anfrage auf ein Bild (max. 30)
+  timeout: 3.0         # so lange wartet eine Anfrage auf ein Bild (max. 30);
+                       # unter 5 lassen, laenger wartet die STARFACE nicht
   read_timeout: 10.0   # so lange wartet ffmpeg auf Daten der Kamera
   width: 800           # herunterskalieren; Hoehe folgt dem Seitenverhaeltnis
 

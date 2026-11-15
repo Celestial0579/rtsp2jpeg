@@ -1,0 +1,7 @@
+# Was im Abbild installiert wird: feste Versionen mit Pruefsummen, damit
+# zwei Bauten desselben Commits dieselben Pakete enthalten. Dependabot
+# aktualisiert Version und Pruefsummen gemeinsam.
+PyYAML==6.0.3 \
+    --hash=sha256:41715c910c881bc081f1e8872880d3c650acf13dfa8214bad49ed4cede7c34ea \
+    --hash=sha256:8dc52c23056b9ddd46818a57b78404882310fb473d63f17b07d5c40421e47f8e \
+    --hash=sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f
