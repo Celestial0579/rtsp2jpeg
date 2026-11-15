@@ -31,7 +31,7 @@ server:
   # Adresse(n) des eigenen Proxys (siehe beispiele/internet/). Nur von dort
   # wertet der Dienst X-Forwarded-For aus; alle anderen Gegenstellen zaehlen
   # mit ihrer echten Adresse. Ein blosses true startet nicht.
-  # trust_proxy: 172.29.80.2
+  # trust_proxy: 172.29.80.200
 
   # Nur diese Gegenstellen bedienen, etwa die STARFACE oder den Proxy;
   # alle anderen Verbindungen schliesst der Dienst sofort. Leer = alle.

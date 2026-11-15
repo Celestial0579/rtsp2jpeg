@@ -202,7 +202,7 @@ Auf der Serverseite:
 
 `trust_proxy` und `allow_from` nehmen IPv4-Adressen oder Netze, in der Datei
 als Liste, in der Umgebung (`TRUST_PROXY`, `ALLOW_FROM`) durch Kommas
-getrennt, etwa `172.29.80.2` oder `10.0.0.0/24`.
+getrennt, etwa `172.29.80.200` oder `10.0.0.0/24`.
 
 Schalter wie `allow_anonymous` müssen echte Wahrheitswerte sein: `true` oder
 `false` ohne Anführungszeichen. Text wie `"false"` — auch aus einer
