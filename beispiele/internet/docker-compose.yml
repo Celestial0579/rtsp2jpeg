@@ -23,7 +23,7 @@ services:
     networks:
       intern:
         # Feste Adresse: rtsp2jpeg vertraut X-Forwarded-For nur von hier.
-        ipv4_address: 172.29.80.2
+        ipv4_address: 172.29.80.200
     depends_on:
       - rtsp2jpeg
 
@@ -41,9 +41,9 @@ services:
       CAMERA_NAME: tuer
       TOKEN: ${RTSP2JPEG_TOKEN:?RTSP2JPEG_TOKEN muss gesetzt sein}
       # Adresse von Caddy (oben): nur von dort zaehlt X-Forwarded-For.
-      TRUST_PROXY: "172.29.80.2"
+      TRUST_PROXY: "172.29.80.200"
       # Nur Caddy darf ueberhaupt verbinden.
-      ALLOW_FROM: "172.29.80.2"
+      ALLOW_FROM: "172.29.80.200"
       TZ: Europe/Berlin
     read_only: true
     tmpfs:
@@ -58,6 +58,9 @@ networks:
     ipam:
       config:
         - subnet: 172.29.80.0/24
+          # Automatisch vergeben wird nur die untere Haelfte; die feste
+          # Adresse des Proxys liegt darueber und ist so nie schon belegt.
+          ip_range: 172.29.80.0/25
 
 volumes:
   caddy-daten:
