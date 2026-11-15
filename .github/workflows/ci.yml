@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+    # Ein Release-Tag schiebt zusaetzlich ein versioniertes Abbild (v0.3.0 -> :0.3.0).
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
   # Woechentlicher Neubau, damit Basisabbild und ffmpeg aktuell bleiben.
@@ -47,8 +49,9 @@ jobs:
     env:
       # Pull Requests bauen das Abbild nur (prueft das Dockerfile), sie
       # schieben nichts in die Registry. Veroeffentlicht wird allein aus
-      # main -- per Push oder von Hand ueber workflow_dispatch.
-      VEROEFFENTLICHEN: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+      # main -- per Push, Zeitplan oder von Hand ueber workflow_dispatch --
+      # und aus Release-Tags v*.
+      VEROEFFENTLICHEN: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -60,9 +63,33 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       # Der Kontoname wird bei GitHub so geschrieben, wie er angelegt wurde;
       # ein Abbildname muss dagegen durchgehend klein sein.
-      - name: Kontonamen kleinschreiben
-        id: konto
-        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      # main bekommt :latest, ein Release-Tag v1.2.3 bekommt :1.2.3 -- aber
+      # nur, wenn die Version in pyproject.toml dazu passt.
+      - name: Abbildnamen bestimmen
+        id: abbild
+        run: |
+          name="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rtsp2jpeg"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME ist keine Version der Form v1.2.3"
+              exit 1
+            fi
+            projekt="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)"
+            if [[ "$projekt" != "$version" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME passt nicht zu pyproject.toml ($projekt)"
+              exit 1
+            fi
+            haupt="$name:$version"
+          else
+            haupt="$name:latest"
+          fi
+          {
+            echo "tags<<ENDE"
+            echo "$haupt"
+            echo "$name:$GITHUB_SHA"
+            echo "ENDE"
+          } >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -71,8 +98,6 @@ jobs:
           # neue Pakete des Basisabbilds nie an.
           pull: true
           no-cache: ${{ github.event_name == 'schedule' }}
-          tags: |
-            ghcr.io/${{ steps.konto.outputs.name }}/rtsp2jpeg:latest
-            ghcr.io/${{ steps.konto.outputs.name }}/rtsp2jpeg:${{ github.sha }}
+          tags: ${{ steps.abbild.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
