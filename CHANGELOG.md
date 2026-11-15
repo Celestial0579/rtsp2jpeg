@@ -1,5 +1,20 @@
 # Änderungen
 
+## 0.2.2
+
+### Geändert
+
+- Ist die Kamera aus oder nicht erreichbar und ffmpeg ohne Bild
+  ausgestiegen, antwortet der Dienst sofort mit `503`, statt bis `timeout`
+  zu warten.
+- Vorgabe für `timeout` von 10 auf 3 Sekunden, weil die STARFACE höchstens
+  5 Sekunden auf ein Bild wartet. Wer bisher auf die Vorgabe gesetzt hat und
+  länger warten will, trägt `timeout` selbst ein.
+- Das Image läuft auf Python 3.15; die Unittests laufen zusätzlich unter 3.15.
+- README: Der Knopf „Verbindung testen“ in der STARFACE prüft nur den
+  Browser des Admin-Rechners, nicht die Anlage.
+- Das Internet-Beispiel nutzt das Image `:0.2.2`.
+
 ## 0.2.1
 
 > **Achtung, Bruch bei `TRUST_PROXY` / `trust_proxy`:** Die Einstellung
