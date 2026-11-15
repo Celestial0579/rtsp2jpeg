@@ -193,6 +193,24 @@ class TestLoadConfig:
             load_config(path, {})
         assert "12345" not in str(fehler.value)
 
+    @pytest.mark.parametrize("eintrag", [
+        "input_args: '-rtsp_flags geheim-prefer_tcp'",
+        "output_args: '-vf geheim'",
+        "input_args: ['-timeout', 5000000]",
+        "input_args: {a: geheim}",
+    ])
+    def test_argumente_nur_als_liste_von_texten(self, tmp_path, eintrag):
+        path = write(tmp_path, f"cameras: {{a: {{url: 'rtsp://h/a', {eintrag}}}}}")
+        with pytest.raises(ConfigError, match="muss eine Liste von Texten sein") as fehler:
+            load_config(path, {})
+        assert "geheim" not in str(fehler.value)
+        assert "5000000" not in str(fehler.value)
+
+    def test_argumente_als_liste_bleiben_erhalten(self, tmp_path):
+        path = write(tmp_path, "cameras: {a: {url: 'rtsp://h/a', "
+                               "input_args: ['-rtsp_flags', 'prefer_tcp']}}")
+        assert load_config(path, {}).cameras["a"].input_args == ["-rtsp_flags", "prefer_tcp"]
+
     def test_fehlende_datei(self, tmp_path):
         with pytest.raises(ConfigError, match="nicht gefunden"):
             load_config(str(tmp_path / "gibtsnicht.yaml"), {})

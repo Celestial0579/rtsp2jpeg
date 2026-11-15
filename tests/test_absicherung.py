@@ -117,10 +117,6 @@ class TestStartwarnungen:
         hinweise = warn_ueber_die_absicherung(self.baue(allow_anonymous=True))
         assert any("ohne Zugangsschutz" in h for h in hinweise)
 
-    def test_kurzes_token_wird_bemaengelt(self):
-        hinweise = warn_ueber_die_absicherung(self.baue(token="kurz"))
-        assert any("kurz" in h for h in hinweise)
-
     def test_langes_token_ist_in_ordnung(self):
         assert warn_ueber_die_absicherung(self.baue(token="a" * 48)) == []
 

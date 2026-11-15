@@ -102,6 +102,10 @@ Das ist Absicht. Eine Warnzeile im Protokoll übersieht man, und das Bild der
 eigenen Haustür gehört nicht ins offene Netz. Fehlen `token` und `basic_auth`,
 bricht der Start mit einer Anleitung ab und Exit-Code 3.
 
+Ebenso, wenn der Zugang zu schwach ist: ein Token unter 24 Zeichen, ein
+Passwort in `basic_auth` unter 16 Zeichen oder Leerraum am Anfang oder Ende
+(meist ein Zeilenende aus einer `.env`-Datei).
+
 Soll der Dienst wirklich ohne Schutz laufen — etwa in einem abgeschotteten
 Netz, in dem er ohnehin niemand erreicht —, muss das ausdrücklich dastehen:
 
