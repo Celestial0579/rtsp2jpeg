@@ -51,7 +51,8 @@ defaults:
   quality: 5           # 2 = beste, 31 = schlechteste (ffmpeg -q:v)
   transport: tcp       # tcp ist bei Tuersprechstellen deutlich stabiler als udp
   max_age: 5.0         # aelteres Bild gilt als abgestanden
-  timeout: 10.0        # so lange wartet eine Anfrage auf ein Bild (max. 30)
+  timeout: 3.0         # so lange wartet eine Anfrage auf ein Bild (max. 30);
+                       # unter 5 lassen, laenger wartet die STARFACE nicht
   read_timeout: 10.0   # so lange wartet ffmpeg auf Daten der Kamera
   width: 800           # herunterskalieren; Hoehe folgt dem Seitenverhaeltnis
 

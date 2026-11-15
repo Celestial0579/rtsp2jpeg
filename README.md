@@ -75,6 +75,11 @@ docker compose up -d
 Die URL endet bewusst auf `.jpg` — STARFACE prüft das Format, und ein Pfad
 ohne diese Endung ist eine häufige Fehlerquelle.
 
+Der Knopf **Verbindung testen** ruft die URL im Browser des Admin-Rechners ab,
+nicht in der Anlage. Ob die STARFACE selbst an den Dienst herankommt, zeigt
+erst ein Anruf. Beim Klingeln wartet die Anlage höchstens 5 s auf jedes Bild;
+deshalb steht `timeout` auf 3 s.
+
 ### Der Login muss in die URL
 
 STARFACE bietet nur ein einziges URL-Feld, kein getrenntes Feld für Benutzer
@@ -169,7 +174,8 @@ Dabei gilt:
   für Anfragezeile und Kopfzeilen, höchstens 32 gleichzeitige Verbindungen
   und davon 8 je Adresse (der Proxy aus `trust_proxy` ausgenommen).
 - Liefert die Kamera innerhalb von `timeout` kein Bild, antwortet der Dienst
-  mit einem leeren `503`.
+  mit einem leeren `503`. Ist ffmpeg bereits ohne Bild ausgestiegen (Kamera
+  aus oder nicht erreichbar), kommt das `503` sofort.
 
 ## Konfiguration
 
@@ -186,7 +192,7 @@ Alles Weitere steht kommentiert in
 | `transport` | tcp | `tcp` ist bei Türsprechstellen deutlich stabiler als `udp` |
 | `idle_timeout` | 60 | Sekunden ohne Abruf, bis ffmpeg einschläft; `0` = dauerhaft |
 | `max_age` | 5.0 | ab wann ein Bild als abgestanden gilt |
-| `timeout` | 10.0 | wie lange eine Anfrage auf ein Bild wartet (höchstens 30) |
+| `timeout` | 3.0 | wie lange eine Anfrage auf ein Bild wartet (höchstens 30); die STARFACE wartet höchstens 5 s |
 | `read_timeout` | 10.0 | wie lange ffmpeg auf Daten der Kamera wartet |
 
 Auf der Serverseite:
