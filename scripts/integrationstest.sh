@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-TOKEN="pruef-token"
+TOKEN="pruef-token-fuer-den-integrationstest"
 BEHALTEN=0
 [[ "${1:-}" == "--behalten" ]] && BEHALTEN=1
 

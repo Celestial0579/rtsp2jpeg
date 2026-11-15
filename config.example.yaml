@@ -22,8 +22,11 @@ server:
   # Ohne 'token' und ohne 'basic_auth' startet der Dienst nicht -- das ist
   # Absicht. Soll er wirklich offen sein (abgeschottetes Netz), muss das
   # ausdruecklich dastehen: allow_anonymous: true
+  #
+  # Zu schwach startet ebenfalls nicht: Token unter 24 Zeichen, Passwort in
+  # basic_auth unter 16 Zeichen, Leerraum am Anfang oder Ende.
   token: ${RTSP2JPEG_TOKEN}
-  # basic_auth: "starface:geheim"
+  # basic_auth: "starface:${STARFACE_PASSWORT}"
 
   # Nur einschalten, wenn wirklich ein Proxy davorsteht (siehe
   # beispiele/internet/). Sonst koennte jeder seine Herkunft per

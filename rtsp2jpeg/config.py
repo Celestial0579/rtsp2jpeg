@@ -180,8 +180,18 @@ def _coerce_camera(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> 
         if value is None:
             continue
         want = _CAMERA_FIELDS[key]
+        if want is list:
+            # Text wuerde sonst in Einzelzeichen zerlegt. Den Wert nicht
+            # nennen -- er kann Zugangsdaten enthalten.
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ConfigError(
+                    f"Kamera {name!r}: {key!r} muss eine Liste von Texten sein, "
+                    f"etwa ['-rtsp_flags', 'prefer_tcp']"
+                )
+            values[key] = list(value)
+            continue
         try:
-            values[key] = want(value) if want is not list else list(value)
+            values[key] = want(value)
         except (TypeError, ValueError) as exc:
             raise ConfigError(
                 f"Kamera {name!r}: {key!r} erwartet {want.__name__}, "

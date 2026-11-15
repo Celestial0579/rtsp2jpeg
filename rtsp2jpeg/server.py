@@ -403,15 +403,65 @@ def token_erzeugen(laenge: int = 24) -> str:
     return secrets.token_hex(laenge)
 
 
+MIN_TOKEN = 24      # Zeichen
+MIN_PASSWORT = 16   # Zeichen im Passwortteil von basic_auth
+
+_NEU_ERZEUGEN = (
+    "Neues Token erzeugen:\n"
+    "    docker run --rm ghcr.io/celestial0579/rtsp2jpeg:latest --token-erzeugen"
+)
+
+
+def _zu_schwach(config: Config) -> str | None:
+    """Begruendung, wenn ein eingerichteter Zugang zu schwach ist.
+
+    Jeder eingerichtete Weg ist ein Zugang zum Bild; deshalb muss jeder fuer
+    sich genuegen. Der Wert selbst wird nie genannt.
+    """
+    server = config.server
+    if server.token:
+        if server.token != server.token.strip():
+            return (
+                "Das Token beginnt oder endet mit Leerraum -- der Dienst startet "
+                "nicht.\n\nMeist ist das ein Zeilenende aus einer .env-Datei oder "
+                "einem Secret. Den Wert ohne Leerraum eintragen."
+            )
+        if len(server.token) < MIN_TOKEN:
+            return (
+                f"Das Token ist zu kurz ({len(server.token)} Zeichen, mindestens "
+                f"{MIN_TOKEN}) -- der Dienst startet nicht.\n\n"
+                f"Ein kurzes Token laesst sich erraten. {_NEU_ERZEUGEN}"
+            )
+    if server.basic_auth:
+        passwort = server.basic_auth.partition(":")[2]
+        if server.basic_auth != server.basic_auth.strip():
+            return (
+                "basic_auth beginnt oder endet mit Leerraum -- der Dienst "
+                "startet nicht.\n\nMeist ist das ein Zeilenende aus einer "
+                ".env-Datei oder einem Secret. Den Wert ohne Leerraum eintragen."
+            )
+        if len(passwort) < MIN_PASSWORT:
+            return (
+                f"Das Passwort in basic_auth ist zu kurz ({len(passwort)} Zeichen, "
+                f"mindestens {MIN_PASSWORT}) -- der Dienst startet nicht.\n\n"
+                f"Laengeres Passwort waehlen oder auf das Token wechseln. "
+                f"{_NEU_ERZEUGEN}"
+            )
+    return None
+
+
 def fehlt_der_zugangsschutz(config: Config) -> str | None:
     """Begruendung, warum der Dienst nicht starten darf -- sonst None.
 
     Ohne Zugangsschutz zu starten hiesse, das Kamerabild der Haustuer jedem
     zu zeigen, der den Port findet. Das muss ausdruecklich gewollt sein, und
-    zwar mit einem echten Wahrheitswert.
+    zwar mit einem echten Wahrheitswert. Ein zu schwacher Zugang zaehlt wie
+    ein fehlender: eine Warnzeile im Protokoll uebersieht man.
     """
     server = config.server
-    if server.token or server.basic_auth or server.allow_anonymous is True:
+    if server.token or server.basic_auth:
+        return _zu_schwach(config)
+    if server.allow_anonymous is True:
         return None
     return (
         "Kein Zugangsschutz eingerichtet -- der Dienst startet nicht.\n"
@@ -439,12 +489,6 @@ def warn_ueber_die_absicherung(config: Config) -> list[str]:
             "Der Dienst laeuft ohne Zugangsschutz (allow_anonymous). Jeder, "
             "der den Port erreicht, sieht das Kamerabild. Aus dem Internet "
             "darf er so nicht erreichbar sein."
-        )
-    if server.token and len(server.token) < 24:
-        hinweise.append(
-            f"Das Token ist mit {len(server.token)} Zeichen kurz. Fuer einen "
-            f"aus dem Internet erreichbaren Dienst mindestens 24 Zeichen "
-            f"verwenden: openssl rand -hex 24"
         )
     return hinweise
 
