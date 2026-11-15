@@ -1,5 +1,5 @@
 # Basisabbild per Digest festgelegt; Dependabot schlaegt neue vor.
-FROM python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
+FROM python:3.15-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd
 
 # ffmpeg macht die eigentliche Arbeit; tini raeumt Zombie-Prozesse ab,
 # weil rtsp2jpeg staendig ffmpeg-Kindprozesse startet und beendet.
