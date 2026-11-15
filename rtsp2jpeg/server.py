@@ -1,11 +1,17 @@
-"""HTTP-Schnittstelle: liefert Standbilder, die STARFACE abholen kann."""
+"""HTTP-Schnittstelle: liefert genau eines -- das Standbild fuer die Anlage.
+
+Es gibt einen einzigen Weg: ``GET /cam/<name>.jpg``. Alles andere wird mit
+einer leeren Fehlerantwort abgewiesen, jede Verbindung traegt genau eine
+Anfrage und wird danach geschlossen.
+"""
 
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 import hmac
-import json
+import ipaddress
 import logging
 import re
 import secrets
@@ -15,76 +21,120 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs
 
 from .config import Config
 from .grabber import GrabberPool
 
 log = logging.getLogger(__name__)
 
-BOUNDARY = "rtsp2jpeg-frame"
-_MAX_WAIT = 60.0  # Obergrenze fuer per Anfrage gesetzte Wartezeiten
+_BILDPFAD = re.compile(r"/cam/([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.jpg")
+_METHODE = re.compile(r"[A-Z]{1,16}")
+
+# Feste Grenzen. Sie stehen absichtlich nicht in der Konfiguration.
+LESEFRIST = 5.0          # Sekunden je Lese- oder Schreibvorgang auf dem Socket
+MAX_VERBINDUNGEN = 32    # gleichzeitig offene Verbindungen insgesamt
+_MAX_ZEILE = 2048        # Anfragezeile
+_MAX_KOPF = 8192         # Anfragezeile und Kopfzeilen zusammen
+_MAX_PARAMETER = 8       # Abfrageparameter
 
 
-_TOKEN_IM_PFAD = re.compile(r"(?i)\btoken=[^&]*")
+class _KopfZuGrossError(Exception):
+    """Anfragezeile und Kopfzeilen ueberschreiten das Budget."""
 
 
-def redact_query(path: str) -> str:
-    """Entfernt das Token aus einem Pfad, bevor er ins Protokoll geht."""
-    return _TOKEN_IM_PFAD.sub("token=***", path)
+class _BegrenzterLeser:
+    """Liest hoechstens ``budget`` Bytes; danach bricht die Anfrage ab.
 
+    ``http.client.parse_headers`` liest zeilenweise -- ohne Obergrenze
+    duerften Kopfzeilen bis zu 100 x 64 KiB gross werden.
+    """
 
-def _clamp(value: str | None, fallback: float, low: float, high: float) -> float:
-    if value is None:
-        return fallback
-    try:
-        return max(low, min(high, float(value)))
-    except ValueError:
-        return fallback
+    def __init__(self, raw: Any, budget: int) -> None:
+        self._raw = raw
+        self._rest = budget
+
+    def readline(self, size: int = -1) -> bytes:
+        if self._rest <= 0:
+            raise _KopfZuGrossError
+        limit = self._rest + 1 if size is None or size < 0 else min(size, self._rest + 1)
+        line = self._raw.readline(limit)
+        self._rest -= len(line)
+        if self._rest < 0:
+            raise _KopfZuGrossError
+        return line
+
+    def read(self, size: int = -1) -> bytes:  # pragma: no cover - nie benutzt
+        raise _KopfZuGrossError
+
+    def close(self) -> None:
+        self._raw.close()
 
 
 class Bremse:
-    """Verzoegert Anfragen von Gegenstellen, die das Token raten.
+    """Verzoegert die Pruefung fuer Gegenstellen, die schon falsch lagen.
 
-    Der Dienst steht bei einer Cloud-Anlage im offenen Netz. Ein Token laesst
-    sich nicht in wenigen Versuchen erraten, aber ungebremst darf niemand
-    tausende Versuche pro Sekunde machen.
+    Die Wartezeit liegt *vor* der Pruefung, und gleichzeitige Versuche
+    derselben Gegenstelle bekommen nacheinander liegende Zeitfenster: zehn
+    parallele Versuche dauern zusammen so lange wie zehn nacheinander. Wird
+    die Warteschlange einer Gegenstelle laenger als ``max_wait``, weist der
+    Dienst weitere Versuche ab, ohne sie zu pruefen.
     """
 
     def __init__(self, max_delay: float = 2.0, reset_after: float = 900.0,
-                 max_entries: int = 4096) -> None:
+                 max_entries: int = 4096, max_wait: float = 10.0) -> None:
         self._max_delay = max_delay
         self._reset_after = reset_after
         self._max_entries = max_entries
+        self.max_wait = max_wait
         self._lock = threading.Lock()
-        self._fehlversuche: dict[str, tuple[int, float]] = {}
+        # Gegenstelle -> (Fehlversuche, letzter Fehlversuch, naechstes freies Fenster)
+        self._fehlversuche: dict[str, tuple[int, float, float]] = {}
 
-    def delay_for(self, client: str) -> float:
-        """Wartezeit, die dieser Gegenstelle vor der Antwort zusteht.
+    def _delay(self, count: int) -> float:
+        return min(self._max_delay, 0.1 * (2 ** min(count, 8)))
 
-        Ein unbekannter Absender wartet nie. Wichtig ist die Unterscheidung
-        "kein Eintrag" gegen "alter Eintrag": der Nullpunkt von monotonic()
-        ist beliebig gewaehlt, ein Vergleich gegen 0.0 waere auf einem eben
-        erst gestarteten Rechner etwas voellig anderes als auf einem, der
-        seit Wochen laeuft.
+    def reserve(self, client: str) -> float | None:
+        """Wartezeit vor der Pruefung -- ``None`` heisst: gar nicht pruefen.
+
+        Ein unbekannter Absender wartet nie. Der Nullpunkt von monotonic()
+        ist beliebig gewaehlt; deshalb zaehlt "kein Eintrag", nicht ein
+        Vergleich gegen 0.0.
         """
+        now = time.monotonic()
         with self._lock:
             eintrag = self._fehlversuche.get(client)
             if eintrag is None:
                 return 0.0
-            count, last = eintrag
-            if time.monotonic() - last > self._reset_after:
+            count, last, frei = eintrag
+            if now - last > self._reset_after:
+                del self._fehlversuche[client]
                 return 0.0
-            return min(self._max_delay, 0.1 * (2 ** min(count, 8)))
+            beginn = max(now, frei)
+            ende = beginn + self._delay(count)
+            if ende - now > self.max_wait:
+                return None
+            self._fehlversuche[client] = (count, last, ende)
+            return ende - now
+
+    def delay_for(self, client: str) -> float:
+        """Grundverzoegerung dieser Gegenstelle, ohne etwas zu reservieren."""
+        with self._lock:
+            eintrag = self._fehlversuche.get(client)
+            if eintrag is None or time.monotonic() - eintrag[1] > self._reset_after:
+                return 0.0
+            return self._delay(eintrag[0])
 
     def note_failure(self, client: str) -> int:
         now = time.monotonic()
         with self._lock:
             eintrag = self._fehlversuche.get(client)
-            count = 0 if eintrag is None or now - eintrag[1] > self._reset_after \
-                else eintrag[0]
+            if eintrag is None or now - eintrag[1] > self._reset_after:
+                count, frei = 0, now
+            else:
+                count, frei = eintrag[0], eintrag[2]
             count += 1
-            self._fehlversuche[client] = (count, now)
+            self._fehlversuche[client] = (count, now, frei)
             if len(self._fehlversuche) > self._max_entries:
                 # Aeltesten Eintrag verwerfen -- der Speicher darf nicht
                 # unbegrenzt wachsen, nur weil jemand die Quell-IP wechselt.
@@ -98,278 +148,204 @@ class Bremse:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "rtsp2jpeg"
-    sys_version = ""
-    protocol_version = "HTTP/1.1"
+    # HTTP/1.0: keine wiederverwendeten Verbindungen, eine Anfrage je Verbindung.
+    protocol_version = "HTTP/1.0"
+    timeout = LESEFRIST
 
     config: Config
     pool: GrabberPool
     bremse: Bremse
+    verbindungsfrist: float
 
-    # -- Geruest -----------------------------------------------------------
+    # -- Verbindung --------------------------------------------------------
+
+    def setup(self) -> None:
+        super().setup()
+        self.rfile = _BegrenzterLeser(self.rfile, _MAX_KOPF)  # type: ignore[assignment]
+        # Harte Obergrenze fuer die ganze Verbindung, unabhaengig davon, wie
+        # langsam die Gegenstelle Byte fuer Byte liefert.
+        self._wecker = threading.Timer(self.verbindungsfrist, self._abbrechen)
+        self._wecker.daemon = True
+        self._wecker.start()
+
+    def finish(self) -> None:
+        self._wecker.cancel()
+        with contextlib.suppress(OSError):
+            super().finish()
+
+    def _abbrechen(self) -> None:
+        with contextlib.suppress(OSError):
+            self.connection.shutdown(socket.SHUT_RDWR)
+
+    def handle(self) -> None:
+        self.close_connection = True
+        self.handle_one_request()
+
+    def handle_one_request(self) -> None:
+        self.close_connection = True
+        self.command = None  # type: ignore[assignment]
+        self.request_version = "HTTP/1.0"
+        try:
+            try:
+                self.raw_requestline = self.rfile.readline(_MAX_ZEILE + 1)
+                if not self.raw_requestline:
+                    return
+                if len(self.raw_requestline) > _MAX_ZEILE:
+                    return self._antwort(HTTPStatus.REQUEST_URI_TOO_LONG)
+                if not self.parse_request():
+                    return
+            except _KopfZuGrossError:
+                return self._antwort(HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE)
+            if self.request_version not in ("HTTP/1.0", "HTTP/1.1"):
+                return
+            if self.command != "GET":
+                return self._antwort(HTTPStatus.METHOD_NOT_ALLOWED, ("Allow", "GET"))
+            if self._hat_rumpf():
+                return self._antwort(HTTPStatus.BAD_REQUEST)
+            self._bild()
+            self.wfile.flush()
+        except OSError:  # Zeitlimit, abgebrochene Verbindung
+            log.debug("Verbindung von %s vorzeitig beendet", self.client_name())
+        except Exception as exc:  # pragma: no cover - Notnagel
+            log.error("Interner Fehler (%s)", type(exc).__name__)
+            with contextlib.suppress(OSError):
+                self._antwort(HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _hat_rumpf(self) -> bool:
+        if self.headers.get_all("Transfer-Encoding"):
+            return True
+        return any(v.strip() != "0" for v in self.headers.get_all("Content-Length") or [])
+
+    # -- Protokoll ---------------------------------------------------------
 
     def client_name(self) -> str:
-        """Gegenstelle -- hinter einem Proxy die echte Absender-Adresse."""
-        if self.config.server.trust_proxy:
-            forwarded = self.headers.get("X-Forwarded-For", "")
+        """Gegenstelle -- hinter einem Proxy die von ihm gemeldete Adresse.
+
+        Massgeblich ist der letzte Eintrag in X-Forwarded-For: den hat der
+        eigene Proxy angehaengt. Alles davor stammt vom Absender selbst.
+        """
+        if self.config.server.trust_proxy and getattr(self, "headers", None) is not None:
+            forwarded = self.headers.get_all("X-Forwarded-For") or []
             if forwarded:
-                # Der erste Eintrag ist der urspruengliche Absender.
-                return forwarded.split(",")[0].strip()[:64]
-        return self.address_string()
+                letzter = forwarded[-1].split(",")[-1].strip()
+                with contextlib.suppress(ValueError):
+                    return str(ipaddress.ip_address(letzter))
+        return self.client_address[0]
+
+    def _protokolliere(self, code: int) -> None:
+        if not self.config.server.access_log:
+            return
+        methode = self.command if self.command and _METHODE.fullmatch(self.command) else "-"
+        pfad = getattr(self, "path", "").partition("?")[0]
+        pfad = pfad if _BILDPFAD.fullmatch(pfad) else "-"
+        log.info('%s "%s %s" %d', self.client_name(), methode, pfad, code)
 
     def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
-        if self.config.server.access_log:
-            log.info('%s "%s %s" %s', self.client_name(), self.command,
-                     redact_query(self.path), code)
+        pass  # eigenes Protokoll in _protokolliere
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        if self.config.server.access_log:
-            log.info("%s %s", self.client_name(), fmt % args)
+        pass  # die Vorlage des Basismoduls enthielte die rohe Anfragezeile
 
-    def log_error(self, fmt: str, *args: Any) -> None:
-        log.debug("%s %s", self.client_name(), fmt % args)
+    def send_error(self, code: int, message: str | None = None,
+                   explain: str | None = None) -> None:
+        """Fehler aus dem Basismodul -- ebenfalls ohne Rumpf und ohne Text."""
+        self._antwort(HTTPStatus(code))
 
-    def do_GET(self) -> None:
-        self._dispatch(body=True)
+    # -- Antworten ---------------------------------------------------------
 
-    def do_HEAD(self) -> None:
-        self._dispatch(body=False)
-
-    def _dispatch(self, body: bool) -> None:
-        parsed = urlparse(self.path)
-        path = unquote(parsed.path)
-        query = parse_qs(parsed.query)
-
-        try:
-            if path in ("/healthz", "/health"):
-                if self.config.server.protect_health and not self._authorized(query):
-                    return self._deny()
-                return self._health(body)
-
-            if not self._authorized(query):
-                return self._deny()
-
-            if path == "/":
-                return self._index(body)
-            if path == "/status":
-                return self._status(body)
-            if path.startswith("/cam/") and path.endswith(".jpg"):
-                return self._snapshot(path[len("/cam/") : -len(".jpg")], query, body)
-            if path.startswith("/cam/") and path.endswith(".mjpg"):
-                return self._mjpeg(path[len("/cam/") : -len(".mjpg")], query, body)
-
-            self._error(HTTPStatus.NOT_FOUND, f"Unbekannter Pfad: {path}")
-        except (BrokenPipeError, ConnectionResetError):
-            log.debug("Gegenstelle hat die Verbindung getrennt: %s", path)
-        except Exception:  # pragma: no cover - Notnagel
-            log.exception("Fehler bei der Anfrage %s", path)
-            with contextlib.suppress(OSError):
-                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "Interner Fehler")
-
-    # -- Zugangsschutz -----------------------------------------------------
-
-    def _authorized(self, query: dict[str, list[str]]) -> bool:
-        """Prueft den Zugang.
-
-        Der Login muss sich vollstaendig in der URL unterbringen lassen, weil
-        STARFACE nur ein einziges URL-Feld anbietet. Deshalb zaehlt sowohl
-        ``?token=...`` als auch ``https://benutzer:passwort@host/...`` --
-        letzteres schickt der abrufende Client als Basic-Kopfzeile.
-        """
-        server = self.config.server
-        if not server.token and not server.basic_auth:
-            return True
-
-        header = self.headers.get("Authorization", "")
-
-        if server.token:
-            candidates = [
-                *query.get("token", []),
-                self.headers.get("X-Auth-Token", ""),
-            ]
-            if header.startswith("Bearer "):
-                candidates.append(header[len("Bearer ") :].strip())
-            if any(hmac.compare_digest(c, server.token) for c in candidates if c):
-                self.bremse.note_success(self.client_name())
-                return True
-
-        if server.basic_auth and header.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(header[len("Basic ") :].strip()).decode("utf-8")
-            except (ValueError, UnicodeDecodeError):
-                return False
-            if hmac.compare_digest(decoded, server.basic_auth):
-                self.bremse.note_success(self.client_name())
-                return True
-
-        return False
-
-    def _deny(self) -> None:
-        client = self.client_name()
-        verzoegerung = self.bremse.delay_for(client)
-        versuche = self.bremse.note_failure(client)
-        if verzoegerung:
-            time.sleep(verzoegerung)
-        # Nur den Pfad protokollieren -- ein fast richtig geratenes Token
-        # hat im Protokoll nichts verloren.
-        log.warning("Abgewiesen: %s (%d. Fehlversuch) %s",
-                    client, versuche, urlparse(self.path).path)
-
-        payload = json.dumps({"error": "nicht autorisiert"}).encode()
-        self.send_response(HTTPStatus.UNAUTHORIZED)
-        if self.config.server.basic_auth:
-            self.send_header("WWW-Authenticate", 'Basic realm="rtsp2jpeg"')
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    # -- Endpunkte ---------------------------------------------------------
-
-    def _snapshot(self, name: str, query: dict[str, list[str]], body: bool) -> None:
-        if name not in self.pool:
-            return self._error(
-                HTTPStatus.NOT_FOUND,
-                f"Kamera {name!r} ist nicht konfiguriert -- bekannt sind: "
-                f"{', '.join(sorted(self.pool.grabbers))}",
-            )
-
-        grabber = self.pool[name]
-        camera = grabber.camera
-
-        if not body:  # HEAD -- nur ankuendigen, kein Bild holen
-            self.send_response(HTTPStatus.OK)
-            self._no_cache_headers("image/jpeg")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-
-        first = lambda key: query.get(key, [None])[0]  # noqa: E731
-        max_age = _clamp(first("max_age"), camera.max_age, 0.0, _MAX_WAIT)
-        timeout = _clamp(first("timeout"), camera.timeout, 0.5, _MAX_WAIT)
-        allow_stale = first("stale") in ("1", "true", "ja", "yes")
-
-        try:
-            frame = grabber.get_frame(max_age=max_age, timeout=timeout)
-        except TimeoutError as exc:
-            stale = grabber.latest() if allow_stale else None
-            if stale is None:
-                return self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
-            frame = stale
-
-        self.send_response(HTTPStatus.OK)
-        self._no_cache_headers("image/jpeg")
-        self.send_header("Content-Length", str(len(frame.data)))
-        self.send_header("X-Frame-Age", f"{frame.age:.3f}")
-        self.end_headers()
-        self.wfile.write(frame.data)
-
-    def _mjpeg(self, name: str, query: dict[str, list[str]], body: bool) -> None:
-        if name not in self.pool:
-            return self._error(HTTPStatus.NOT_FOUND, f"Kamera {name!r} ist nicht konfiguriert")
-
-        grabber = self.pool[name]
-        self.send_response(HTTPStatus.OK)
-        self._no_cache_headers(f"multipart/x-mixed-replace; boundary={BOUNDARY}")
-        self.end_headers()
-        if not body:
-            return
-
-        # Bei laufendem Strom ist die Laenge unbekannt -- Verbindung nicht
-        # wiederverwenden, sonst verhaspelt sich HTTP/1.1 keep-alive.
+    def _antwort(self, code: HTTPStatus, *kopf: tuple[str, str]) -> None:
+        """Leere Antwort: Statuszeile, wenige Kopfzeilen, kein Inhalt."""
         self.close_connection = True
+        self._protokolliere(code)
+        self.send_response_only(code)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        for name, wert in kopf:
+            self.send_header(name, wert)
+        self.send_header("Connection", "close")
+        self.end_headers()
 
+    def _bild(self) -> None:
+        pfad, _, abfrage = self.path.partition("?")
+        client = self.client_name()
+
+        if self._zugang_noetig():
+            warten = self.bremse.reserve(client)
+            if warten is None:
+                log.debug("Abgewiesen ohne Pruefung: %s (zu viele Fehlversuche)", client)
+                return  # Verbindung wortlos schliessen
+            if warten:
+                time.sleep(warten)
+            if not self._authorized(abfrage):
+                versuche = self.bremse.note_failure(client)
+                log.warning("Abgewiesen: %s (%d. Fehlversuch)", client, versuche)
+                kopf = [("WWW-Authenticate", 'Basic realm="rtsp2jpeg"')] \
+                    if self.config.server.basic_auth else []
+                return self._antwort(HTTPStatus.UNAUTHORIZED, *kopf)
+            self.bremse.note_success(client)
+
+        treffer = _BILDPFAD.fullmatch(pfad)
+        if treffer is None or treffer.group(1) not in self.pool:
+            return self._antwort(HTTPStatus.NOT_FOUND)
+
+        grabber = self.pool[treffer.group(1)]
         try:
-            for frame in grabber.stream():
-                header = (
-                    f"--{BOUNDARY}\r\n"
-                    f"Content-Type: image/jpeg\r\n"
-                    f"Content-Length: {len(frame.data)}\r\n\r\n"
-                ).encode()
-                self.wfile.write(header)
-                self.wfile.write(frame.data)
-                self.wfile.write(b"\r\n")
-        except (BrokenPipeError, ConnectionResetError):
-            log.debug("MJPEG-Abnehmer fuer %s hat aufgelegt", name)
+            frame = grabber.get_frame()
+        except TimeoutError:
+            log.warning("Kamera %s: kein aktuelles Bild", grabber.camera.name)
+            return self._antwort(HTTPStatus.SERVICE_UNAVAILABLE)
 
-    def _health(self, body: bool) -> None:
-        healthy = self.pool.is_healthy()
-        payload = {
-            "status": "ok" if healthy else "degraded",
-            "cameras": {
-                s["name"]: {
-                    "running": s["running"],
-                    "frame_age": s["frame_age"],
-                    "last_error": s["last_error"],
-                }
-                for s in self.pool.status()
-            },
-        }
-        code = HTTPStatus.OK if healthy else HTTPStatus.SERVICE_UNAVAILABLE
-        self._json(code, payload, body)
-
-    def _status(self, body: bool) -> None:
-        self._json(HTTPStatus.OK, {"cameras": self.pool.status()}, body)
-
-    def _index(self, body: bool) -> None:
-        rows = []
-        for status in self.pool.status():
-            name = status["name"]
-            state = "laeuft" if status["running"] else "im Leerlauf"
-            age = status["frame_age"]
-            age_text = f"{age:.1f}s alt" if isinstance(age, float) else "noch kein Bild"
-            rows.append(
-                f"<tr><td><code>{name}</code></td>"
-                f"<td><a href='/cam/{name}.jpg'>/cam/{name}.jpg</a></td>"
-                f"<td><a href='/cam/{name}.mjpg'>/cam/{name}.mjpg</a></td>"
-                f"<td>{state}, {age_text}</td></tr>"
-            )
-        html = f"""<!doctype html>
-<html lang="de"><meta charset="utf-8"><title>rtsp2jpeg</title>
-<style>
- body {{ font-family: system-ui, sans-serif; margin: 2rem; max-width: 60rem; }}
- table {{ border-collapse: collapse; width: 100%; }}
- td, th {{ text-align: left; padding: .4rem .8rem; border-bottom: 1px solid #ddd; }}
- code {{ background: #f4f4f4; padding: .1rem .3rem; }}
-</style>
-<h1>rtsp2jpeg</h1>
-<p>Standbilder aus RTSP-Kameras, abrufbar als JPEG &ndash; gedacht fuer das
-Feld <em>Kamera-URL</em> einer STARFACE-Tuersprechstelle.</p>
-<table>
-<tr><th>Kamera</th><th>Einzelbild</th><th>Bewegtbild</th><th>Zustand</th></tr>
-{"".join(rows)}
-</table>
-<p><a href="/healthz">/healthz</a> &middot; <a href="/status">/status</a></p>
-</html>"""
-        self._send(HTTPStatus.OK, html.encode("utf-8"), "text/html; charset=utf-8", body)
-
-    # -- Hilfen ------------------------------------------------------------
-
-    def _no_cache_headers(self, content_type: str) -> None:
-        self.send_header("Content-Type", content_type)
-        # STARFACE und die Apps sollen jedes Mal ein frisches Bild bekommen.
+        self._protokolliere(HTTPStatus.OK)
+        self.send_response_only(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(frame.data)))
+        # Die Anlage soll jedes Mal ein frisches Bild bekommen.
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
-
-    def _json(self, code: HTTPStatus, payload: dict[str, Any], body: bool) -> None:
-        data = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
-        self._send(code, data, "application/json; charset=utf-8", body)
-
-    def _error(self, code: HTTPStatus, message: str) -> None:
-        log.warning("%s: %s", code.value, message)
-        data = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
-        self._send(code, data, "application/json; charset=utf-8", True)
-
-    def _send(self, code: HTTPStatus, data: bytes, content_type: str, body: bool) -> None:
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        if code >= 400:
-            self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
         self.end_headers()
-        if body:
-            self.wfile.write(data)
+        self.wfile.write(frame.data)
+
+    # -- Zugangsschutz -----------------------------------------------------
+
+    def _zugang_noetig(self) -> bool:
+        server = self.config.server
+        return bool(server.token or server.basic_auth)
+
+    def _authorized(self, abfrage: str) -> bool:
+        """Prueft den Zugang -- genau ein Versuch je Weg und Anfrage.
+
+        Der Login muss in die URL passen, weil die Anlage nur ein einziges
+        URL-Feld anbietet: ``?token=...`` oder ``https://benutzer:passwort@host/...``
+        (letzteres schickt der Client als Basic-Kopfzeile).
+        """
+        server = self.config.server
+
+        if server.token:
+            try:
+                werte = parse_qs(abfrage, keep_blank_values=True,
+                                 max_num_fields=_MAX_PARAMETER)
+            except ValueError:
+                return False
+            tokens = werte.get("token", [])
+            if len(tokens) == 1 and hmac.compare_digest(
+                tokens[0].encode("utf-8"), server.token.encode("utf-8")
+            ):
+                return True
+
+        if server.basic_auth:
+            koepfe = self.headers.get_all("Authorization") or []
+            if len(koepfe) == 1 and koepfe[0].startswith("Basic "):
+                try:
+                    gegeben = base64.b64decode(koepfe[0][len("Basic "):].strip(),
+                                               validate=True)
+                except (ValueError, binascii.Error):
+                    return False
+                if hmac.compare_digest(gegeben, server.basic_auth.encode("utf-8")):
+                    return True
+
+        return False
 
 
 class Server(ThreadingHTTPServer):
@@ -377,13 +353,49 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
     address_family = socket.AF_INET
 
+    def __init__(self, address: tuple[str, int], handler: type[Handler],
+                 max_verbindungen: int = MAX_VERBINDUNGEN) -> None:
+        self._plaetze = threading.BoundedSemaphore(max_verbindungen)
+        super().__init__(address, handler)
 
-def make_server(config: Config, pool: GrabberPool) -> Server:
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._plaetze.acquire(blocking=False):
+            # Kein Platz frei: Verbindung sofort schliessen, ohne Antwort.
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._plaetze.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._plaetze.release()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        log.debug("Verbindung mit Fehler beendet")
+
+
+def make_server(config: Config, pool: GrabberPool, *,
+                max_verbindungen: int = MAX_VERBINDUNGEN,
+                lesefrist: float = LESEFRIST,
+                bremse: Bremse | None = None) -> Server:
+    bremse = bremse or Bremse()
+    laengste_wartezeit = max(c.timeout for c in config.cameras.values())
     handler = type(
         "BoundHandler", (Handler,),
-        {"config": config, "pool": pool, "bremse": Bremse()},
+        {
+            "config": config,
+            "pool": pool,
+            "bremse": bremse,
+            "timeout": lesefrist,
+            "verbindungsfrist": 2 * lesefrist + bremse.max_wait + laengste_wartezeit,
+        },
     )
-    return Server((config.server.host, config.server.port), handler)
+    return Server((config.server.host, config.server.port), handler, max_verbindungen)
 
 
 def token_erzeugen(laenge: int = 24) -> str:
@@ -394,14 +406,12 @@ def token_erzeugen(laenge: int = 24) -> str:
 def fehlt_der_zugangsschutz(config: Config) -> str | None:
     """Begruendung, warum der Dienst nicht starten darf -- sonst None.
 
-    Der Dienst ist dafuer gedacht, aus dem Internet erreichbar zu sein: eine
-    STARFACE-Cloud-Anlage holt das Bild selbst ab. Ohne Zugangsschutz zu
-    starten hiesse, das Kamerabild der Haustuer jedem zu zeigen, der den Port
-    findet. Deshalb wird das nicht stillschweigend hingenommen, sondern muss
-    ausdruecklich gewollt sein.
+    Ohne Zugangsschutz zu starten hiesse, das Kamerabild der Haustuer jedem
+    zu zeigen, der den Port findet. Das muss ausdruecklich gewollt sein, und
+    zwar mit einem echten Wahrheitswert.
     """
     server = config.server
-    if server.token or server.basic_auth or server.allow_anonymous:
+    if server.token or server.basic_auth or server.allow_anonymous is True:
         return None
     return (
         "Kein Zugangsschutz eingerichtet -- der Dienst startet nicht.\n"
@@ -424,7 +434,7 @@ def warn_ueber_die_absicherung(config: Config) -> list[str]:
     hinweise = []
     server = config.server
 
-    if not server.token and not server.basic_auth and server.allow_anonymous:
+    if not server.token and not server.basic_auth and server.allow_anonymous is True:
         hinweise.append(
             "Der Dienst laeuft ohne Zugangsschutz (allow_anonymous). Jeder, "
             "der den Port erreicht, sieht das Kamerabild. Aus dem Internet "
@@ -456,4 +466,4 @@ def serve_forever(config: Config, pool: GrabberPool) -> None:  # pragma: no cove
         server.server_close()
 
 
-__all__ = ["Handler", "Server", "make_server", "serve_forever"]
+__all__ = ["Bremse", "Handler", "Server", "make_server", "serve_forever"]

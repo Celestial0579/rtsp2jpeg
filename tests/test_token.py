@@ -55,6 +55,11 @@ class TestFehltDerZugangsschutz:
     def test_ausdruecklich_offen_ist_erlaubt(self):
         assert fehlt_der_zugangsschutz(baue(allow_anonymous=True)) is None
 
+    @pytest.mark.parametrize("wert", ["false", "true", 1, "0"])
+    def test_nur_ein_echtes_true_oeffnet(self, wert):
+        """Auch ohne Konfigurationspruefung zaehlt nur der Wahrheitswert selbst."""
+        assert fehlt_der_zugangsschutz(baue(allow_anonymous=wert)) is not None
+
     def test_ausdruecklich_offen_wird_trotzdem_angemahnt(self):
         hinweise = warn_ueber_die_absicherung(baue(allow_anonymous=True))
         assert any("ohne Zugangsschutz" in h for h in hinweise)
@@ -108,3 +113,23 @@ class TestKommandozeile:
         monkeypatch.delenv("TOKEN", raising=False)
         monkeypatch.setenv("ALLOW_ANONYMOUS", "0")
         assert main(["--check"]) == 3
+
+    def test_text_false_in_der_datei_verhindert_den_start(self, tmp_path, monkeypatch,
+                                                         capsys):
+        datei = tmp_path / "config.yaml"
+        datei.write_text('server: {allow_anonymous: "false"}\n'
+                         'cameras: {tuer: {url: "rtsp://host/s"}}\n', encoding="utf-8")
+        monkeypatch.delenv("TOKEN", raising=False)
+        monkeypatch.delenv("ALLOW_ANONYMOUS", raising=False)
+        monkeypatch.delenv("CAMERA_URL", raising=False)
+        assert main(["-c", str(datei)]) == 2
+        fehler = capsys.readouterr().err
+        assert "allow_anonymous" in fehler
+        assert "startet nicht" in fehler
+
+    def test_mehrdeutige_umgebung_verhindert_den_start(self, monkeypatch, capsys):
+        monkeypatch.setenv("CAMERA_URL", "rtsp://host/s")
+        monkeypatch.delenv("TOKEN", raising=False)
+        monkeypatch.setenv("ALLOW_ANONYMOUS", "vielleicht")
+        assert main([]) == 2
+        assert "ALLOW_ANONYMOUS" in capsys.readouterr().err

@@ -64,7 +64,7 @@ for _ in $(seq 1 60); do
     if im_container "python -c \"
 import sys, urllib.request
 try:
-    with urllib.request.urlopen('http://127.0.0.1:8080/cam/tuer.jpg?token=$TOKEN&timeout=3', timeout=6) as r:
+    with urllib.request.urlopen('http://127.0.0.1:8080/cam/tuer.jpg?token=$TOKEN', timeout=15) as r:
         sys.exit(0 if r.status == 200 else 1)
 except Exception:
     sys.exit(1)
@@ -85,14 +85,6 @@ echo "  OK    Kamera liefert"
 echo
 echo "--- Pruefungen ---"
 
-pruefe "/healthz meldet ok" im_container "
-python -c \"
-import json, urllib.request
-with urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5) as r:
-    daten = json.load(r)
-assert daten['status'] == 'ok', daten
-\""
-
 pruefe "Standbild ist ein gueltiges JPEG mit 1280x720" im_container "
 python -c \"
 import urllib.request
@@ -112,7 +104,7 @@ pruefe "Bilder aendern sich (bewegtes Testbild)" im_container "
 python -c \"
 import time, urllib.request
 def hole():
-    with urllib.request.urlopen('http://127.0.0.1:8080/cam/tuer.jpg?token=$TOKEN&max_age=0.5', timeout=10) as r:
+    with urllib.request.urlopen('http://127.0.0.1:8080/cam/tuer.jpg?token=$TOKEN', timeout=10) as r:
         return r.read()
 a = hole(); time.sleep(1.5); b = hole()
 assert a != b, 'zweimal dasselbe Bild'
@@ -142,13 +134,32 @@ else:
     raise SystemExit('unbekannte Kamera lieferte ein Bild')
 \""
 
-pruefe "MJPEG-Strom liefert mehrere Bilder" im_container "
+pruefe "entfallene Pfade gibt es auch mit Token nicht (404, ohne Inhalt)" im_container "
 python -c \"
-import urllib.request
-with urllib.request.urlopen('http://127.0.0.1:8080/cam/tuer.mjpg?token=$TOKEN', timeout=15) as r:
-    assert r.headers['Content-Type'].startswith('multipart/x-mixed-replace')
-    daten = r.read(200000)
-assert daten.count(b'--rtsp2jpeg-frame') >= 2, daten.count(b'--rtsp2jpeg-frame')
+import urllib.error, urllib.request
+for pfad in ('/', '/healthz', '/status', '/cam/tuer.mjpg'):
+    try:
+        urllib.request.urlopen('http://127.0.0.1:8080' + pfad + '?token=$TOKEN', timeout=5)
+    except urllib.error.HTTPError as e:
+        with e:
+            assert e.code == 404, (pfad, e.code)
+            assert e.read() == b'', pfad
+    else:
+        raise SystemExit(pfad + ' lieferte etwas')
+\""
+
+pruefe "nur GET (405)" im_container "
+python -c \"
+import urllib.error, urllib.request
+anfrage = urllib.request.Request('http://127.0.0.1:8080/cam/tuer.jpg?token=$TOKEN',
+                                 data=b'x', method='POST')
+try:
+    urllib.request.urlopen(anfrage, timeout=5)
+except urllib.error.HTTPError as e:
+    with e:
+        assert e.code == 405, e.code
+else:
+    raise SystemExit('POST wurde angenommen')
 \""
 
 pruefe "Bild kommt auch durch den vorgelagerten Webserver" im_container "
@@ -160,7 +171,7 @@ with urllib.request.urlopen('http://proxy/cam/tuer.jpg?token=$TOKEN', timeout=15
 assert daten.startswith(b'\xff\xd8') and daten.endswith(b'\xff\xd9'), 'kein JPEG'
 \""
 
-pruefe "Proxy gibt die Statusseiten nicht nach aussen" im_container "
+pruefe "Proxy gibt nur /cam/* nach aussen" im_container "
 python -c \"
 import urllib.error, urllib.request
 for pfad in ('/status', '/', '/healthz'):
@@ -227,7 +238,7 @@ python -c \"
 import time, urllib.request
 beginn = time.monotonic()
 with urllib.request.urlopen(
-        'http://127.0.0.1:8080/cam/tuer.jpg?token=$TOKEN&timeout=30', timeout=35) as r:
+        'http://127.0.0.1:8080/cam/tuer.jpg?token=$TOKEN', timeout=35) as r:
     groesse = len(r.read())
 print('  Erstes Bild nach Neustart: %.2f s (%d Bytes)'
       % (time.monotonic() - beginn, groesse))

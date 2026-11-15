@@ -3,28 +3,15 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
 import urllib.parse
 
 import rtsp2jpeg.server
 from rtsp2jpeg.config import CameraConfig, Config, ServerConfig
-from rtsp2jpeg.server import Bremse, redact_query, warn_ueber_die_absicherung
+from rtsp2jpeg.server import Bremse, warn_ueber_die_absicherung
 
-from .test_server import dienst, hole, hole_fehler
-
-
-class TestRedactQuery:
-    def test_token_wird_unkenntlich(self):
-        assert redact_query("/cam/t.jpg?token=geheim") == "/cam/t.jpg?token=***"
-
-    def test_auch_zwischen_anderen_parametern(self):
-        ergebnis = redact_query("/cam/t.jpg?max_age=1&token=geheim&stale=1")
-        assert "geheim" not in ergebnis
-        assert "max_age=1" in ergebnis
-        assert "stale=1" in ergebnis
-
-    def test_ohne_token_unveraendert(self):
-        assert redact_query("/cam/t.jpg?max_age=1") == "/cam/t.jpg?max_age=1"
+from .test_server import dienst, hole, hole_fehler, roh
 
 
 class TestBremse:
@@ -79,6 +66,26 @@ class TestBremse:
         for _ in range(5):
             bremse.note_failure("1.2.3.4")
         assert bremse.delay_for("5.6.7.8") == 0.0
+
+    def test_gleichzeitige_versuche_bekommen_nacheinander_liegende_fenster(self):
+        bremse = Bremse(max_delay=2.0, max_wait=100.0)
+        bremse.note_failure("1.2.3.4")
+        wartezeiten = [bremse.reserve("1.2.3.4") for _ in range(5)]
+        assert all(w is not None for w in wartezeiten)
+        assert wartezeiten == sorted(wartezeiten)
+        assert wartezeiten[-1] >= 5 * 0.2 - 0.01
+
+    def test_volle_warteschlange_wird_nicht_geprueft(self):
+        bremse = Bremse(max_delay=2.0, max_wait=1.0)
+        for _ in range(10):
+            bremse.note_failure("1.2.3.4")
+        assert bremse.reserve("1.2.3.4") is None
+        assert bremse.reserve("5.6.7.8") == 0.0
+
+    def test_unbekannte_gegenstelle_reserviert_nichts(self):
+        bremse = Bremse()
+        assert bremse.reserve("1.2.3.4") == 0.0
+        assert bremse.reserve("1.2.3.4") == 0.0
 
     def test_speicher_waechst_nicht_unbegrenzt(self):
         """Wer die Quell-IP wechselt, darf den Speicher nicht vollmuellen."""
@@ -150,13 +157,33 @@ class TestLoginInDerUrl:
             )
         assert status == 200
 
-    def test_token_taucht_im_zugriffsprotokoll_nicht_auf(self, fake_ffmpeg, caplog):
+    def test_token_taucht_im_protokoll_nicht_auf(self, fake_ffmpeg, caplog):
         token = "streng-geheimes-token-1234"
-        with caplog.at_level("INFO"), dienst(fake_ffmpeg, token=token,
-                                             access_log=True) as base:
+        with caplog.at_level("DEBUG"), dienst(fake_ffmpeg, token=token,
+                                              access_log=True) as base:
             hole(f"{base}/cam/tuer.jpg?token={token}")
+            hole_fehler(f"{base}/cam/tuer.jpg?token={token}x")
+            hole_fehler(f"{base}/status?token={token}")
+            roh(base, f"GET /cam/tuer.jpg?token={token} HTTP/9.9\r\n\r\n".encode())
+            roh(base, f"POST /cam/tuer.jpg?token={token} HTTP/1.1\r\n\r\n".encode())
         assert token not in caplog.text
-        assert "token=***" in caplog.text
+        assert '"GET /cam/tuer.jpg" 200' in caplog.text
+        assert '"GET -" 404' in caplog.text
+
+    def test_kamera_passwort_taucht_im_protokoll_nicht_auf(self, fake_ffmpeg, monkeypatch,
+                                                           caplog):
+        url = "rtsp://admin:pa@ss/wort@host/s"
+        monkeypatch.setenv("FAKE_STDERR", f"{url}: Connection refused")
+        monkeypatch.setenv("FAKE_FRAMES", "1")
+        monkeypatch.setenv("FAKE_EXIT_CODE", "1")
+        cameras = {"tuer": CameraConfig(name="tuer", url=url, timeout=1.0, idle_timeout=0)}
+        with caplog.at_level("DEBUG"), dienst(fake_ffmpeg, cameras=cameras,
+                                              access_log=True) as base:
+            hole(f"{base}/cam/tuer.jpg")
+            time.sleep(1.0)  # ffmpeg endet mit Fehler, der Greifer meldet es
+        assert "Connection refused" in caplog.text
+        assert "pa@ss" not in caplog.text
+        assert "ss/wort" not in caplog.text
 
     def test_falsches_token_wird_gebremst(self, fake_ffmpeg):
         """Mehrere Fehlversuche muessen spuerbar langsamer werden."""
@@ -169,14 +196,56 @@ class TestLoginInDerUrl:
         assert status == 401
         assert dauer > 0.2, f"Fehlversuch kam nach {dauer:.3f}s zurueck"
 
-    def test_richtiges_token_bleibt_schnell(self, fake_ffmpeg):
+    def test_gleichzeitige_fehlversuche_werden_ebenfalls_gebremst(self, fake_ffmpeg):
+        """Parallel geschickte Versuche duerfen nicht zusammen durchrutschen."""
+        with dienst(fake_ffmpeg, token="a" * 32) as base:
+            hole_fehler(f"{base}/cam/tuer.jpg?token=falsch")
+            dauern: list[float] = []
+            sperre = threading.Lock()
+
+            def versuch() -> None:
+                beginn = time.monotonic()
+                hole_fehler(f"{base}/cam/tuer.jpg?token=falsch", timeout=30)
+                with sperre:
+                    dauern.append(time.monotonic() - beginn)
+
+            threads = [threading.Thread(target=versuch) for _ in range(6)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+        assert len(dauern) == 6
+        # Einzeln je mindestens 0,2 s -- nacheinander also mindestens 1,2 s.
+        assert max(dauern) >= 1.1, f"laengster Versuch {max(dauern):.2f}s"
+
+    def test_auch_das_richtige_token_wartet_nach_fehlversuchen(self, fake_ffmpeg):
+        """Sonst verriete die schnelle Antwort den Treffer unter vielen Versuchen."""
         token = "a" * 32
         with dienst(fake_ffmpeg, token=token) as base:
             hole(f"{base}/cam/tuer.jpg?token={token}")   # Bild schon im Speicher
-            for _ in range(6):
+            for _ in range(3):
                 hole_fehler(f"{base}/cam/tuer.jpg?token=falsch")
             beginn = time.monotonic()
             status, _, _ = hole(f"{base}/cam/tuer.jpg?token={token}")
+            dauer = time.monotonic() - beginn
+            # danach ist die Strafe vergessen
+            beginn = time.monotonic()
+            hole(f"{base}/cam/tuer.jpg?token={token}")
+            danach = time.monotonic() - beginn
+        assert status == 200
+        assert dauer >= 0.3, f"gueltiger Abruf kam nach {dauer:.3f}s"
+        assert danach < 0.5
+
+    def test_andere_gegenstelle_bleibt_schnell(self, fake_ffmpeg):
+        token = "a" * 32
+        with dienst(fake_ffmpeg, token=token, trust_proxy=True) as base:
+            hole(f"{base}/cam/tuer.jpg?token={token}")
+            for _ in range(6):
+                hole_fehler(f"{base}/cam/tuer.jpg?token=falsch",
+                            headers={"X-Forwarded-For": "203.0.113.66"})
+            beginn = time.monotonic()
+            status, _, _ = hole(f"{base}/cam/tuer.jpg?token={token}",
+                                headers={"X-Forwarded-For": "198.51.100.7"})
             dauer = time.monotonic() - beginn
         assert status == 200
         assert dauer < 1.0, f"gueltiger Abruf dauerte {dauer:.3f}s"
@@ -194,9 +263,19 @@ class TestHinterEinemProxy:
             hole(f"{base}/cam/tuer.jpg", headers={"X-Forwarded-For": "203.0.113.9"})
         assert "203.0.113.9" in caplog.text
 
-    def test_mehrere_proxys_erster_eintrag_zaehlt(self, fake_ffmpeg, caplog):
+    def test_letzter_eintrag_zaehlt(self, fake_ffmpeg, caplog):
+        """Den letzten Eintrag hat der eigene Proxy angehaengt -- der Rest ist frei erfunden."""
         with caplog.at_level("INFO"), dienst(fake_ffmpeg, trust_proxy=True,
                                              access_log=True) as base:
             hole(f"{base}/cam/tuer.jpg",
                  headers={"X-Forwarded-For": "203.0.113.9, 10.0.0.1"})
-        assert "203.0.113.9" in caplog.text
+        assert "10.0.0.1" in caplog.text
+        assert "203.0.113.9" not in caplog.text
+
+    def test_unsinn_im_kopf_landet_nicht_im_protokoll(self, fake_ffmpeg, caplog):
+        with caplog.at_level("INFO"), dienst(fake_ffmpeg, trust_proxy=True,
+                                             access_log=True) as base:
+            hole(f"{base}/cam/tuer.jpg",
+                 headers={"X-Forwarded-For": "erfunden-und-sehr-lang"})
+        assert "erfunden" not in caplog.text
+        assert "127.0.0.1" in caplog.text

@@ -1,24 +1,25 @@
 from __future__ import annotations
 
-import base64
-import json
+import socket
 import threading
 import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 import pytest
 
 from rtsp2jpeg.config import CameraConfig, Config, ServerConfig
 from rtsp2jpeg.grabber import GrabberPool
-from rtsp2jpeg.server import make_server
+from rtsp2jpeg.server import Bremse, make_server
 
 from .conftest import is_jpeg
 
 
 @contextmanager
-def dienst(fake_ffmpeg, cameras=None, **server_kwargs):
+def dienst(fake_ffmpeg, cameras=None, *, max_verbindungen=32, lesefrist=5.0,
+           bremse=None, **server_kwargs):
     """Startet den HTTP-Dienst auf einem freien Port."""
     cameras = cameras or {
         "tuer": CameraConfig(
@@ -31,7 +32,8 @@ def dienst(fake_ffmpeg, cameras=None, **server_kwargs):
     config = Config(server=ServerConfig(**einstellungen), cameras=cameras)
     pool = GrabberPool(cameras, ffmpeg=fake_ffmpeg)
     pool.start()
-    server = make_server(config, pool)
+    server = make_server(config, pool, max_verbindungen=max_verbindungen,
+                         lesefrist=lesefrist, bremse=bremse)
     thread = threading.Thread(
         target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
     )
@@ -64,18 +66,39 @@ def hole_fehler(url: str, timeout: float = 15.0, **kwargs):
     raise AssertionError(f"Anfrage {url} war unerwartet erfolgreich ({status})")
 
 
-def status_von(url: str, timeout: float = 15.0, **kwargs):
-    """Anfrage, deren Ausgang offen ist -- liefert (Status, Rumpf)."""
-    request = urllib.request.Request(url, **kwargs)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as fehler:
-        with fehler:
-            return fehler.code, fehler.read()
+def verbinde(base: str, timeout: float = 10.0) -> socket.socket:
+    teile = urlsplit(base)
+    return socket.create_connection((teile.hostname, teile.port), timeout=timeout)
 
 
-class TestSnapshot:
+def roh(base: str, daten: bytes, timeout: float = 10.0) -> bytes:
+    """Schickt Bytes unveraendert und liest, bis der Dienst schliesst."""
+    with verbinde(base, timeout) as sock:
+        sock.sendall(daten)
+        antwort = b""
+        while True:
+            try:
+                stueck = sock.recv(65536)
+            except ConnectionResetError:
+                break
+            if not stueck:
+                break
+            antwort += stueck
+    return antwort
+
+
+def zerlege(antwort: bytes) -> tuple[int, dict[str, str], bytes]:
+    kopf, _, rumpf = antwort.partition(b"\r\n\r\n")
+    zeilen = kopf.decode("latin-1").split("\r\n")
+    status = int(zeilen[0].split()[1])
+    felder = {}
+    for zeile in zeilen[1:]:
+        name, _, wert = zeile.partition(":")
+        felder[name.strip().lower()] = wert.strip()
+    return status, felder, rumpf
+
+
+class TestBild:
     def test_liefert_ein_jpeg(self, fake_ffmpeg):
         with dienst(fake_ffmpeg) as base:
             status, headers, body = hole(f"{base}/cam/tuer.jpg")
@@ -85,185 +108,35 @@ class TestSnapshot:
         assert is_jpeg(body)
 
     def test_wird_nicht_zwischengespeichert(self, fake_ffmpeg):
-        """STARFACE und die Apps sollen jedes Mal ein frisches Bild sehen."""
+        """Die Anlage soll jedes Mal ein frisches Bild sehen."""
         with dienst(fake_ffmpeg) as base:
             _, headers, _ = hole(f"{base}/cam/tuer.jpg")
         assert "no-store" in headers["Cache-Control"]
         assert headers["Pragma"] == "no-cache"
 
-    def test_alter_steht_im_kopf(self, fake_ffmpeg):
+    def test_verraet_nichts_ueber_sich(self, fake_ffmpeg):
         with dienst(fake_ffmpeg) as base:
             _, headers, _ = hole(f"{base}/cam/tuer.jpg")
-        assert float(headers["X-Frame-Age"]) < 5.0
+        assert "Server" not in headers
+        assert "X-Frame-Age" not in headers
 
     def test_spaeterer_abruf_liefert_ein_neueres_bild(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
+        cameras = {"tuer": CameraConfig(name="tuer", url="rtsp://host/s", fps=25,
+                                        max_age=0.2, timeout=5.0, idle_timeout=0)}
+        with dienst(fake_ffmpeg, cameras=cameras) as base:
             _, _, erst = hole(f"{base}/cam/tuer.jpg")
             time.sleep(0.3)
-            _, _, zweit = hole(f"{base}/cam/tuer.jpg?max_age=0.2")
+            _, _, zweit = hole(f"{base}/cam/tuer.jpg")
         assert erst != zweit
 
-    def test_kurz_aufeinander_folgende_abrufe_teilen_sich_ein_bild(self, fake_ffmpeg):
-        """Zehn Callmanager sollen nicht zehn Kameraverbindungen ausloesen."""
+    def test_abfrageparameter_aendern_nichts(self, fake_ffmpeg):
+        """max_age, timeout, stale gibt es nicht mehr -- sie bleiben wirkungslos."""
         with dienst(fake_ffmpeg) as base:
-            _, _, erst = hole(f"{base}/cam/tuer.jpg?max_age=5")
-            _, _, zweit = hole(f"{base}/cam/tuer.jpg?max_age=5")
-        assert erst == zweit
-
-    def test_unbekannte_kamera_ist_404(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            status, _, body = hole_fehler(f"{base}/cam/garten.jpg")
-        assert status == 404
-        assert "tuer" in json.loads(body)["error"]
-
-    def test_stumme_kamera_ergibt_503(self, fake_ffmpeg, monkeypatch):
-        monkeypatch.setenv("FAKE_START_DELAY", "30")
-        with dienst(fake_ffmpeg) as base:
-            status, _, _ = hole_fehler(f"{base}/cam/tuer.jpg?timeout=1")
-        assert status == 503
-
-    def test_stale_erlaubt_ein_altes_bild(self, fake_ffmpeg):
-        """Lieber ein altes Bild als ein kaputtes Symbol im Callmanager."""
-        with dienst(fake_ffmpeg) as base:
-            hole(f"{base}/cam/tuer.jpg")               # erst ein Bild besorgen
-            status, _, body = hole(f"{base}/cam/tuer.jpg?max_age=0&timeout=0.5&stale=1")
+            status, _, body = hole(f"{base}/cam/tuer.jpg?timeout=abc&max_age=0&stale=1")
         assert status == 200
         assert is_jpeg(body)
 
-    def test_ohne_stale_kein_altes_bild(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            hole(f"{base}/cam/tuer.jpg")
-            status, _, _ = hole_fehler(f"{base}/cam/tuer.jpg?max_age=0&timeout=0.5")
-        assert status == 503
-
-    def test_unsinnige_parameter_werden_ignoriert(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            status, _, body = hole(f"{base}/cam/tuer.jpg?timeout=abc&max_age=xyz")
-        assert status == 200
-        assert is_jpeg(body)
-
-    def test_head_ohne_rumpf(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            status, headers, body = hole(f"{base}/cam/tuer.jpg", method="HEAD")
-        assert status == 200
-        assert headers["Content-Type"] == "image/jpeg"
-        assert body == b""
-
-
-class TestZugangsschutz:
-    def test_ohne_token_offen(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            assert hole(f"{base}/cam/tuer.jpg")[0] == 200
-
-    def test_token_in_der_url(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg, token="geheim") as base:
-            assert hole(f"{base}/cam/tuer.jpg?token=geheim")[0] == 200
-
-    def test_token_als_kopfzeile(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg, token="geheim") as base:
-            bearer = hole(f"{base}/cam/tuer.jpg",
-                          headers={"Authorization": "Bearer geheim"})
-            eigen = hole(f"{base}/cam/tuer.jpg", headers={"X-Auth-Token": "geheim"})
-        assert bearer[0] == 200
-        assert eigen[0] == 200
-
-    @pytest.mark.parametrize(
-        "pfad", ["/cam/tuer.jpg", "/cam/tuer.jpg?token=falsch", "/", "/status",
-                 "/cam/tuer.mjpg"],
-    )
-    def test_ohne_gueltiges_token_401(self, fake_ffmpeg, pfad):
-        with dienst(fake_ffmpeg, token="geheim") as base:
-            status, _, _ = hole_fehler(f"{base}{pfad}")
-        assert status == 401
-
-    def test_basic_auth(self, fake_ffmpeg):
-        auth = base64.b64encode(b"starface:geheim").decode()
-        with dienst(fake_ffmpeg, basic_auth="starface:geheim") as base:
-            gut = hole(f"{base}/cam/tuer.jpg",
-                       headers={"Authorization": f"Basic {auth}"})
-            status, headers, _ = hole_fehler(f"{base}/cam/tuer.jpg")
-        assert gut[0] == 200
-        assert status == 401
-        assert "Basic" in headers["WWW-Authenticate"]
-
-    def test_kaputter_basic_kopf_wird_abgelehnt(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg, basic_auth="a:b") as base:
-            status, _, _ = hole_fehler(
-                f"{base}/cam/tuer.jpg", headers={"Authorization": "Basic !!!kein-base64"}
-            )
-        assert status == 401
-
-    def test_healthz_bleibt_offen(self, fake_ffmpeg):
-        """Docker und Ueberwachung sollen das Geheimnis nicht kennen muessen."""
-        with dienst(fake_ffmpeg, token="geheim") as base:
-            assert hole(f"{base}/healthz")[0] == 200
-
-    def test_healthz_kann_geschuetzt_werden(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg, token="geheim", protect_health=True) as base:
-            status, _, _ = hole_fehler(f"{base}/healthz")
-        assert status == 401
-
-
-class TestWeitereEndpunkte:
-    def test_healthz(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            status, headers, body = hole(f"{base}/healthz")
-        assert status == 200
-        assert headers["Content-Type"].startswith("application/json")
-        assert json.loads(body)["status"] == "ok"
-
-    def test_healthz_meldet_stoerung(self, fake_ffmpeg, monkeypatch):
-        """Antwortet die Kamera dauerhaft nicht, muss /healthz das zeigen."""
-        monkeypatch.setenv("FAKE_START_DELAY", "60")
-        cameras = {
-            "tuer": CameraConfig(name="tuer", url="rtsp://host/s", max_age=0.2,
-                                 timeout=0.5, idle_timeout=0)
-        }
-        with dienst(fake_ffmpeg, cameras=cameras) as base:
-            frist = time.monotonic() + 6.0
-            while time.monotonic() < frist:
-                status, body = status_von(f"{base}/healthz")
-                if status != 200:
-                    break
-                time.sleep(0.2)
-        assert status == 503
-        assert json.loads(body)["status"] == "degraded"
-        assert json.loads(body)["cameras"]["tuer"]["frame_age"] is None
-
-    def test_status_nennt_kein_passwort(self, fake_ffmpeg):
-        cameras = {
-            "tuer": CameraConfig(name="tuer", url="rtsp://admin:streng-geheim@host/s",
-                                 idle_timeout=0)
-        }
-        with dienst(fake_ffmpeg, cameras=cameras) as base:
-            _, _, body = hole(f"{base}/status")
-        assert b"streng-geheim" not in body
-        assert b"***" in body
-
-    def test_startseite_listet_die_kameras(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            status, headers, body = hole(f"{base}/")
-        assert status == 200
-        assert headers["Content-Type"].startswith("text/html")
-        assert b"/cam/tuer.jpg" in body
-
-    def test_unbekannter_pfad_ist_404(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            assert hole_fehler(f"{base}/gibtsnicht")[0] == 404
-
-    def test_mjpeg_liefert_mehrere_teile(self, fake_ffmpeg):
-        with dienst(fake_ffmpeg) as base:
-            request = urllib.request.Request(f"{base}/cam/tuer.mjpg")
-            with urllib.request.urlopen(request, timeout=15) as response:
-                assert response.headers["Content-Type"].startswith(
-                    "multipart/x-mixed-replace"
-                )
-                daten = response.read(20000)
-        assert daten.count(b"--rtsp2jpeg-frame") >= 2
-
-
-class TestMehrereKameras:
-    def test_jede_kamera_eigener_pfad(self, fake_ffmpeg):
+    def test_mehrere_kameras_je_eigener_pfad(self, fake_ffmpeg):
         cameras = {
             name: CameraConfig(name=name, url=f"rtsp://host/{name}", fps=25,
                                timeout=5.0, idle_timeout=0)
@@ -294,3 +167,245 @@ class TestMehrereKameras:
 
         assert len(ergebnisse) == 10
         assert all(status == 200 and gueltig for status, gueltig in ergebnisse)
+
+    def test_rumpf_null_ist_erlaubt(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg) as base:
+            antwort = roh(base, b"GET /cam/tuer.jpg HTTP/1.1\r\nHost: x\r\n"
+                                b"Content-Length: 0\r\n\r\n")
+        status, _, rumpf = zerlege(antwort)
+        assert status == 200
+        assert is_jpeg(rumpf)
+
+
+ENTFALLENE_PFADE = [
+    "/", "/healthz", "/health", "/status", "/index.html", "/cam/tuer.mjpg",
+    "/cam/tuer.jpeg", "/cam/tuer.jpg/", "/cam/tuer", "/cam/", "/cam/../cam/tuer.jpg",
+    "/cam/t%75er.jpg", "/CAM/tuer.jpg", "/gibtsnicht",
+]
+
+
+class TestNurEinWeg:
+    @pytest.mark.parametrize("pfad", ENTFALLENE_PFADE)
+    def test_alles_andere_gibt_es_nicht(self, fake_ffmpeg, pfad):
+        with dienst(fake_ffmpeg, allow_anonymous=True) as base:
+            status, headers, body = hole_fehler(f"{base}{pfad}")
+        assert status == 404
+        assert body == b""
+        assert headers["Content-Length"] == "0"
+
+    @pytest.mark.parametrize("pfad", ENTFALLENE_PFADE)
+    def test_auch_mit_gueltigem_token_nicht(self, fake_ffmpeg, pfad):
+        token = "a" * 48
+        trenner = "&" if "?" in pfad else "?"
+        with dienst(fake_ffmpeg, token=token) as base:
+            status, _, body = hole_fehler(f"{base}{pfad}{trenner}token={token}")
+        assert status == 404
+        assert body == b""
+
+    @pytest.mark.parametrize("pfad", ENTFALLENE_PFADE)
+    def test_ohne_token_nur_401(self, fake_ffmpeg, pfad):
+        """Ohne Zugang erfaehrt niemand, welche Pfade es gibt."""
+        with dienst(fake_ffmpeg, token="a" * 48) as base:
+            status, _, body = hole_fehler(f"{base}{pfad}")
+        assert status == 401
+        assert body == b""
+
+    def test_unbekannte_kamera_nennt_keine_anderen(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg) as base:
+            status, _, body = hole_fehler(f"{base}/cam/garten.jpg")
+        assert status == 404
+        assert body == b""
+
+
+class TestMethodenUndRumpf:
+    @pytest.mark.parametrize(
+        "methode", ["HEAD", "POST", "PUT", "DELETE", "OPTIONS", "TRACE", "PATCH",
+                    "CONNECT", "PROPFIND", "get"],
+    )
+    def test_nur_get(self, fake_ffmpeg, methode):
+        with dienst(fake_ffmpeg) as base:
+            antwort = roh(base, f"{methode} /cam/tuer.jpg HTTP/1.1\r\nHost: x\r\n\r\n"
+                          .encode())
+        status, kopf, rumpf = zerlege(antwort)
+        assert status == 405
+        assert kopf["content-length"] == "0"
+        assert kopf["connection"] == "close"
+        assert rumpf == b""
+
+    @pytest.mark.parametrize(
+        "kopf, rumpf",
+        [
+            (b"Content-Length: 5\r\n", b"hallo"),
+            (b"Content-Length: 5\r\nContent-Length: 0\r\n", b"hallo"),
+            (b"Transfer-Encoding: chunked\r\n", b"5\r\nhallo\r\n0\r\n\r\n"),
+        ],
+    )
+    def test_anfrage_mit_rumpf_wird_abgewiesen(self, fake_ffmpeg, kopf, rumpf):
+        with dienst(fake_ffmpeg) as base:
+            antwort = roh(base, b"GET /cam/tuer.jpg HTTP/1.1\r\nHost: x\r\n"
+                                + kopf + b"\r\n" + rumpf)
+        status, felder, inhalt = zerlege(antwort)
+        assert status == 400
+        assert felder["connection"] == "close"
+        assert inhalt == b""
+
+    def test_rumpf_wird_nie_als_anfrage_gelesen(self, fake_ffmpeg):
+        """Was nach der ersten Anfrage kommt, beantwortet der Dienst nicht."""
+        zweite = b"GET /cam/tuer.jpg HTTP/1.1\r\nHost: x\r\n\r\n"
+        with dienst(fake_ffmpeg) as base:
+            antwort = roh(base, b"POST /cam/tuer.jpg HTTP/1.1\r\nHost: x\r\n"
+                                b"Content-Length: %d\r\n\r\n" % len(zweite) + zweite)
+        assert antwort.count(b"HTTP/1.0 ") == 1
+        assert zerlege(antwort)[0] == 405
+
+    def test_eine_anfrage_je_verbindung(self, fake_ffmpeg):
+        anfrage = b"GET /cam/tuer.jpg HTTP/1.1\r\nHost: x\r\n\r\n"
+        with dienst(fake_ffmpeg) as base:
+            antwort = roh(base, anfrage * 2)
+        assert antwort.count(b"HTTP/1.0 200") == 1
+        assert zerlege(antwort)[1]["connection"] == "close"
+
+    @pytest.mark.parametrize(
+        "anfrage",
+        [
+            b"KAPUTT\r\n\r\n",
+            b"GET /cam/tuer.jpg HTTP/9.9\r\n\r\n",
+            b"GET /cam/tuer.jpg HTTP/1.1\r\n" + b"X-A: " + b"a" * 9000 + b"\r\n\r\n",
+            b"GET /cam/tuer.jpg HTTP/1.1\r\n" + b"X-A: b\r\n" * 2000 + b"\r\n",
+            b"GET /" + b"a" * 5000 + b" HTTP/1.1\r\n\r\n",
+        ],
+    )
+    def test_kaputte_anfragen_ohne_inhalt(self, fake_ffmpeg, anfrage):
+        with dienst(fake_ffmpeg) as base:
+            antwort = roh(base, anfrage)
+        if antwort:  # eine leere Antwort ist ebenfalls in Ordnung
+            status, felder, rumpf = zerlege(antwort)
+            assert status >= 400
+            assert rumpf == b""
+            assert felder["content-length"] == "0"
+        assert b"KAPUTT" not in antwort
+        assert b"9.9" not in antwort
+
+
+class TestFehlerantworten:
+    def test_stumme_kamera_ergibt_leeres_503(self, fake_ffmpeg, monkeypatch):
+        monkeypatch.setenv("FAKE_START_DELAY", "30")
+        monkeypatch.setenv("FAKE_STDERR", "rtsp://admin:streng-geheim@host/s: 401")
+        cameras = {"tuer": CameraConfig(name="tuer", url="rtsp://admin:streng-geheim@host/s",
+                                        timeout=1.0, idle_timeout=0)}
+        with dienst(fake_ffmpeg, cameras=cameras) as base:
+            status, headers, body = hole_fehler(f"{base}/cam/tuer.jpg")
+        assert status == 503
+        assert body == b""
+        assert headers["Content-Length"] == "0"
+        assert "streng-geheim" not in str(headers)
+
+    def test_401_ohne_inhalt(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg, token="a" * 48) as base:
+            status, headers, body = hole_fehler(f"{base}/cam/tuer.jpg?token=falsch")
+        assert status == 401
+        assert body == b""
+        assert headers["Content-Length"] == "0"
+        assert "WWW-Authenticate" not in headers
+
+
+class TestZugangsschutz:
+    def test_token_in_der_url(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg, token="geheim") as base:
+            assert hole(f"{base}/cam/tuer.jpg?token=geheim")[0] == 200
+
+    def test_token_nur_in_der_url(self, fake_ffmpeg):
+        """Bearer und X-Auth-Token sind entfallen -- die Anlage nutzt sie nicht."""
+        with dienst(fake_ffmpeg, token="geheim") as base:
+            bearer = hole_fehler(f"{base}/cam/tuer.jpg",
+                                 headers={"Authorization": "Bearer geheim"})
+            eigen = hole_fehler(f"{base}/cam/tuer.jpg", headers={"X-Auth-Token": "geheim"})
+        assert bearer[0] == 401
+        assert eigen[0] == 401
+
+    def test_ein_versuch_je_anfrage(self, fake_ffmpeg):
+        """Mehrere token-Parameter sind mehrere Versuche -- das zaehlt nicht."""
+        with dienst(fake_ffmpeg, token="geheim") as base:
+            status, _, _ = hole_fehler(f"{base}/cam/tuer.jpg?token=falsch&token=geheim")
+        assert status == 401
+
+    def test_zu_viele_parameter(self, fake_ffmpeg):
+        abfrage = "&".join(f"p{i}=1" for i in range(20))
+        with dienst(fake_ffmpeg, token="geheim") as base:
+            status, _, _ = hole_fehler(f"{base}/cam/tuer.jpg?{abfrage}&token=geheim")
+        assert status == 401
+
+    def test_nicht_ascii_im_token_ist_kein_absturz(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg, token="geheim") as base:
+            status, _, _ = hole_fehler(f"{base}/cam/tuer.jpg?token=%C3%A4%00")
+        assert status == 401
+
+    def test_basic_auth(self, fake_ffmpeg):
+        import base64
+
+        auth = base64.b64encode(b"starface:geheim").decode()
+        with dienst(fake_ffmpeg, basic_auth="starface:geheim") as base:
+            gut = hole(f"{base}/cam/tuer.jpg",
+                       headers={"Authorization": f"Basic {auth}"})
+            status, headers, _ = hole_fehler(f"{base}/cam/tuer.jpg")
+        assert gut[0] == 200
+        assert status == 401
+        assert "Basic" in headers["WWW-Authenticate"]
+
+    @pytest.mark.parametrize("kopf", ["Basic !!!kein-base64", "Basic", "Basic w6Q="])
+    def test_kaputter_basic_kopf_wird_abgelehnt(self, fake_ffmpeg, kopf):
+        with dienst(fake_ffmpeg, basic_auth="a:b") as base:
+            status, _, _ = hole_fehler(f"{base}/cam/tuer.jpg",
+                                       headers={"Authorization": kopf})
+        assert status == 401
+
+
+class TestGrenzen:
+    def test_stumme_verbindung_wird_geschlossen(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg, lesefrist=0.5) as base, verbinde(base) as sock:
+            beginn = time.monotonic()
+            assert sock.recv(100) == b""
+            dauer = time.monotonic() - beginn
+        assert dauer < 3.0, f"Verbindung blieb {dauer:.1f}s offen"
+
+    def test_tropfende_anfrage_hat_eine_obergrenze(self, fake_ffmpeg):
+        """Wer Byte fuer Byte knapp unter der Lesefrist liefert, fliegt trotzdem."""
+        cameras = {"tuer": CameraConfig(name="tuer", url="rtsp://host/s",
+                                        timeout=1.0, idle_timeout=0)}
+        with dienst(fake_ffmpeg, cameras=cameras, lesefrist=0.5,
+                    bremse=Bremse(max_wait=0.5)) as base, verbinde(base) as sock:
+            # Frist: 2 x 0.5 + 0.5 + 1.0 = 2.5 s
+            beginn = time.monotonic()
+            sock.sendall(b"GET /cam/tuer.jpg HTTP/1.1\r\n")
+            geschlossen = False
+            while time.monotonic() - beginn < 8.0:
+                try:
+                    sock.sendall(b"X")
+                except OSError:
+                    geschlossen = True
+                    break
+                time.sleep(0.3)
+            dauer = time.monotonic() - beginn
+        assert geschlossen
+        assert dauer < 5.0, f"Verbindung blieb {dauer:.1f}s offen"
+
+    def test_obergrenze_gleichzeitiger_verbindungen(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg, max_verbindungen=2) as base:
+            belegt = [verbinde(base), verbinde(base)]
+            try:
+                time.sleep(0.3)
+                with verbinde(base) as dritte:
+                    beginn = time.monotonic()
+                    try:
+                        dritte.sendall(b"GET /cam/tuer.jpg HTTP/1.1\r\n\r\n")
+                        antwort = dritte.recv(100)
+                    except ConnectionResetError:
+                        antwort = b""
+                    assert antwort == b""
+                    assert time.monotonic() - beginn < 2.0
+            finally:
+                for sock in belegt:
+                    sock.close()
+            time.sleep(0.3)
+            # Plaetze werden wieder frei
+            assert hole(f"{base}/cam/tuer.jpg")[0] == 200

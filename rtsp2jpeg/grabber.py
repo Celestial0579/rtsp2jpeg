@@ -123,13 +123,11 @@ class Grabber:
         self._frame: Frame | None = None
         self._last_request = time.monotonic()
         self._wanted = camera.idle_timeout <= 0
-        self._wanted_since = time.monotonic()
         self._running = False
         self._stopping = False
         self._process: subprocess.Popen[bytes] | None = None
         self._thread: threading.Thread | None = None
         self._stderr: collections.deque[str] = collections.deque(maxlen=_STDERR_KEEP)
-        self._frames_total = 0
         self._restarts = 0
         self._last_error: str | None = None
 
@@ -163,7 +161,6 @@ class Grabber:
             self._last_request = time.monotonic()
             if not self._wanted:
                 self._wanted = True
-                self._wanted_since = time.monotonic()
                 self._cond.notify_all()
 
     # -- Abruf -------------------------------------------------------------
@@ -195,64 +192,27 @@ class Grabber:
                     break
                 self._cond.wait(remaining)
 
-        detail = self._last_error or "keine Antwort von der Kamera"
         raise TimeoutError(
             f"Kamera {self.camera.name!r}: innerhalb von {timeout:g}s kein "
-            f"Bild juenger als {max_age:g}s -- {detail}"
+            f"Bild juenger als {max_age:g}s"
         )
 
-    def stream(self, timeout: float | None = None):
-        """Generator ueber neu eintreffende Bilder (fuer MJPEG-Ausgabe)."""
-        timeout = self.camera.timeout if timeout is None else timeout
-        self.start()
-        last_ts = 0.0
-        while True:
-            self.touch()
-            deadline = time.monotonic() + timeout
-            with self._cond:
-                while True:
-                    frame = self._frame
-                    if frame is not None and frame.timestamp > last_ts:
-                        last_ts = frame.timestamp
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0 or self._stopping:
-                        return
-                    self._cond.wait(remaining)
-            yield frame
+    # -- Zustand (nur innerhalb des Prozesses, nie nach aussen) -------------
 
-    # -- Status ------------------------------------------------------------
-
-    def status(self) -> dict[str, object]:
+    @property
+    def running(self) -> bool:
         with self._cond:
-            frame = self._frame
-            return {
-                "name": self.camera.name,
-                "url": self.camera.redacted_url,
-                "running": self._running,
-                "wanted": self._wanted,
-                "frames_total": self._frames_total,
-                "restarts": self._restarts,
-                "frame_age": round(frame.age, 3) if frame else None,
-                "frame_bytes": len(frame.data) if frame else None,
-                "last_error": self._last_error,
-                "ffmpeg_log": list(self._stderr),
-            }
+            return self._running
 
-    def is_healthy(self) -> bool:
-        """Gesund heisst: nicht angefordert, oder ein frisches Bild vorhanden.
-
-        Direkt nach dem Start gibt es naturgemaess noch kein Bild -- bis die
-        Nachsichtsfrist abgelaufen ist, gilt das nicht als Stoerung.
-        """
+    @property
+    def restarts(self) -> int:
         with self._cond:
-            if not self._wanted:
-                return True
-            grace = max(self.camera.max_age * 3, self.camera.timeout)
-            frame = self._frame
-            if frame is None:
-                return time.monotonic() - self._wanted_since <= grace
-            return frame.age <= grace
+            return self._restarts
+
+    @property
+    def last_error(self) -> str | None:
+        with self._cond:
+            return self._last_error
 
     # -- Innenleben --------------------------------------------------------
 
@@ -288,8 +248,8 @@ class Grabber:
             if clean or time.monotonic() - started > 60:
                 backoff = _BACKOFF_START
             log.warning(
-                "Kamera %s: ffmpeg beendet, neuer Versuch in %.0fs",
-                self.camera.name, backoff,
+                "Kamera %s: ffmpeg beendet (%s), neuer Versuch in %.0fs",
+                self.camera.name, self.last_error or "ohne Meldung", backoff,
             )
             with self._cond:
                 self._cond.wait(backoff)
@@ -300,7 +260,7 @@ class Grabber:
         cmd = build_command(self.camera, self._ffmpeg)
         log.info("Kamera %s: starte ffmpeg fuer %s",
                  self.camera.name, self.camera.redacted_url)
-        log.debug("Kamera %s: %s", self.camera.name, " ".join(cmd))
+        log.debug("Kamera %s: %s", self.camera.name, self.camera.redact(" ".join(cmd)))
 
         try:
             process = subprocess.Popen(
@@ -376,19 +336,19 @@ class Grabber:
     def _publish(self, data: bytes) -> None:
         with self._cond:
             self._frame = Frame(data=data, timestamp=time.monotonic())
-            self._frames_total += 1
             self._last_error = None
             self._cond.notify_all()
 
     def _note_error(self, message: str) -> None:
         with self._cond:
-            self._last_error = message
+            self._last_error = self.camera.redact(message)
             self._cond.notify_all()
 
     def _drain_stderr(self, process: subprocess.Popen[bytes]) -> None:
         assert process.stderr is not None
         for raw in process.stderr:
-            line = raw.decode("utf-8", "replace").strip()
+            # ffmpeg nennt in seinen Meldungen gern die volle Kamera-URL.
+            line = self.camera.redact(raw.decode("utf-8", "replace").strip())[:500]
             if not line:
                 continue
             self._stderr.append(line)
@@ -446,9 +406,3 @@ class GrabberPool:
     def stop(self) -> None:
         for grabber in self.grabbers.values():
             grabber.stop()
-
-    def status(self) -> list[dict[str, object]]:
-        return [grabber.status() for grabber in self.grabbers.values()]
-
-    def is_healthy(self) -> bool:
-        return all(grabber.is_healthy() for grabber in self.grabbers.values())

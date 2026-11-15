@@ -6,6 +6,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import unquote
 
 import yaml
 
@@ -71,8 +72,12 @@ class CameraConfig:
 
     @property
     def redacted_url(self) -> str:
-        """URL ohne Passwort -- fuer Logs und die Statusseite."""
+        """URL ohne Passwort -- fuer das Protokoll."""
         return redact_url(self.url)
+
+    def redact(self, text: str) -> str:
+        """Entfernt die Zugangsdaten dieser Kamera aus beliebigem Text."""
+        return redact_text(text, self.url)
 
 
 @dataclass(frozen=True)
@@ -81,8 +86,7 @@ class ServerConfig:
     port: int = 8080
     token: str | None = None
     basic_auth: str | None = None       # "benutzer:passwort"
-    protect_health: bool = False        # /healthz standardmaessig ohne Token
-    trust_proxy: bool = False           # X-Forwarded-For fuers Protokoll auswerten
+    trust_proxy: bool = False           # X-Forwarded-For auswerten (nur hinter Proxy)
     allow_anonymous: bool = False       # Betrieb ganz ohne Zugangsschutz zulassen
     log_level: str = "INFO"
     access_log: bool = True
@@ -95,8 +99,41 @@ class Config:
 
 
 def redact_url(url: str) -> str:
-    """Ersetzt das Passwort in ``rtsp://user:pass@host/...`` durch ``***``."""
-    return re.sub(r"(://[^/:@\s]+:)[^@/\s]*(@)", r"\1***\2", url)
+    """Ersetzt das Passwort in ``rtsp://user:pass@host/...`` durch ``***``.
+
+    Massgeblich ist das letzte ``@`` -- ein Passwort darf selbst ``@`` oder
+    ``/`` enthalten. Im Zweifel wird lieber zu viel geschwaerzt als zu wenig.
+    """
+    scheme, sep, rest = url.partition("://")
+    if not sep or "@" not in rest:
+        return url
+    userinfo, _, host = rest.rpartition("@")
+    user, colon, _ = userinfo.partition(":")
+    return f"{scheme}://{user}{':***' if colon else ''}@{host}"
+
+
+def _secrets_of(url: str) -> list[str]:
+    """Passwort einer URL, roh und dekodiert -- leer, wenn es keins gibt."""
+    _, sep, rest = url.partition("://")
+    if not sep or "@" not in rest:
+        return []
+    userinfo = rest.rpartition("@")[0]
+    _, colon, password = userinfo.partition(":")
+    if not colon or not password:
+        return []
+    return sorted({password, unquote(password)}, key=len, reverse=True)
+
+
+_USERINFO_IN_TEXT = re.compile(r"(\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]*:)[^\s@]*@")
+
+
+def redact_text(text: str, url: str | None = None) -> str:
+    """Schwaerzt Zugangsdaten in Text, etwa in einer Meldung von ffmpeg."""
+    if url:
+        text = text.replace(url, redact_url(url))
+        for secret in _secrets_of(url):
+            text = text.replace(secret, "***")
+    return _USERINFO_IN_TEXT.sub(r"\1***@", text)
 
 
 _CAMERA_FIELDS = {
@@ -115,14 +152,17 @@ _CAMERA_FIELDS = {
     "output_args": list,
 }
 
-_VALID_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_VALID_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+MAX_CAMERA_TIMEOUT = 30.0  # laenger wartet keine Anfrage auf ein Bild
 
 
 def _coerce_camera(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> CameraConfig:
     if not _VALID_NAME.match(name):
         raise ConfigError(
             f"Kameraname {name!r} ist unzulaessig: erlaubt sind Buchstaben, "
-            f"Ziffern, '-' und '_', beginnend mit Buchstabe oder Ziffer"
+            f"Ziffern, '-' und '_', beginnend mit Buchstabe oder Ziffer, "
+            f"hoechstens 64 Zeichen"
         )
 
     merged: dict[str, Any] = {**defaults, **raw}
@@ -179,6 +219,18 @@ def _coerce_camera(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> 
             f"Kamera {name!r}: 'rotate' muss 0, 90, 180 oder 270 sein, ist {rotate}"
         )
 
+    timeout = values.get("timeout", 10.0)
+    if not 0 < timeout <= MAX_CAMERA_TIMEOUT:
+        raise ConfigError(
+            f"Kamera {name!r}: 'timeout' muss groesser 0 und hoechstens "
+            f"{MAX_CAMERA_TIMEOUT:g} sein, ist {timeout}"
+        )
+
+    if values.get("max_age", 5.0) < 0:
+        raise ConfigError(
+            f"Kamera {name!r}: 'max_age' darf nicht negativ sein, ist {values['max_age']}"
+        )
+
     if values.get("read_timeout", 10.0) <= 0:
         raise ConfigError(
             f"Kamera {name!r}: 'read_timeout' muss groesser 0 sein, "
@@ -194,21 +246,74 @@ def _coerce_camera(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> 
     return CameraConfig(name=name, **values)
 
 
+_SERVER_FIELDS: dict[str, type] = {
+    "host": str,
+    "port": int,
+    "token": str,
+    "basic_auth": str,
+    "trust_proxy": bool,
+    "allow_anonymous": bool,
+    "log_level": str,
+    "access_log": bool,
+}
+
+# Frueher vorhanden, heute ohne Wirkung -- bestehende Dateien sollen
+# deswegen nicht am Start scheitern.
+_SERVER_OBSOLETE = {"protect_health"}
+
+
+def _check_type(key: str, value: Any, want: type) -> None:
+    if want is bool:
+        if not isinstance(value, bool):
+            raise ConfigError(
+                f"server.{key} muss true oder false sein, ohne Anfuehrungszeichen "
+                f"-- Text (auch aus ${{VARIABLE}}) wird nicht als Wahrheitswert "
+                f"gelesen. Der Dienst startet nicht."
+            )
+    elif want is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"server.{key} muss eine ganze Zahl sein")
+    elif not isinstance(value, want):
+        # Den Wert nicht nennen -- es koennte ein Geheimnis sein.
+        raise ConfigError(f"server.{key} muss Text sein (ist {type(value).__name__})")
+
+
 def _server_from(raw: dict[str, Any]) -> ServerConfig:
-    known = set(ServerConfig.__dataclass_fields__)
-    unknown = set(raw) - known
+    raw = {k: v for k, v in raw.items() if k not in _SERVER_OBSOLETE}
+    unknown = set(raw) - set(_SERVER_FIELDS)
     if unknown:
         raise ConfigError(f"server: unbekannte Einstellung(en) {sorted(unknown)}")
 
-    basic = raw.get("basic_auth")
+    values = {k: v for k, v in raw.items() if v is not None}
+    for key, value in values.items():
+        _check_type(key, value, _SERVER_FIELDS[key])
+
+    basic = values.get("basic_auth")
     if basic is not None and ":" not in basic:
         raise ConfigError("server.basic_auth muss die Form 'benutzer:passwort' haben")
 
-    values = {k: v for k, v in raw.items() if v is not None}
-    try:
-        return ServerConfig(**values)
-    except TypeError as exc:  # pragma: no cover - von der Pruefung oben abgedeckt
-        raise ConfigError(f"server: {exc}") from exc
+    port = values.get("port", 8080)
+    if not 0 <= port <= 65535:
+        raise ConfigError(f"server.port muss zwischen 0 und 65535 liegen, ist {port}")
+
+    return ServerConfig(**values)
+
+
+_TRUE = ("1", "true", "yes", "ja")
+_FALSE = ("0", "false", "no", "nein", "")
+
+
+def _env_switch(name: str, value: str) -> bool:
+    """Schalter aus der Umgebung -- nur eindeutige Werte, sonst kein Start."""
+    word = value.strip().lower()
+    if word in _TRUE:
+        return True
+    if word in _FALSE:
+        return False
+    raise ConfigError(
+        f"{name} muss 1/true/yes oder 0/false/no sein, ist {value!r} "
+        f"-- der Dienst startet nicht"
+    )
 
 
 def load_config(path: str | None = None, environ: dict[str, str] | None = None) -> Config:
@@ -240,17 +345,18 @@ def load_config(path: str | None = None, environ: dict[str, str] | None = None) 
 
     server_raw: dict[str, Any] = dict(raw.get("server") or {})
     if "PORT" in env:
-        server_raw["port"] = int(env["PORT"])
+        try:
+            server_raw["port"] = int(env["PORT"])
+        except ValueError as exc:
+            raise ConfigError(f"PORT muss eine ganze Zahl sein, ist {env['PORT']!r}") from exc
     if "TOKEN" in env:
         server_raw["token"] = env["TOKEN"] or None
     if "BASIC_AUTH" in env:
         server_raw["basic_auth"] = env["BASIC_AUTH"] or None
     if "TRUST_PROXY" in env:
-        server_raw["trust_proxy"] = env["TRUST_PROXY"].lower() in ("1", "true", "ja", "yes")
+        server_raw["trust_proxy"] = _env_switch("TRUST_PROXY", env["TRUST_PROXY"])
     if "ALLOW_ANONYMOUS" in env:
-        server_raw["allow_anonymous"] = env["ALLOW_ANONYMOUS"].lower() in (
-            "1", "true", "ja", "yes"
-        )
+        server_raw["allow_anonymous"] = _env_switch("ALLOW_ANONYMOUS", env["ALLOW_ANONYMOUS"])
     if "LOG_LEVEL" in env:
         server_raw["log_level"] = env["LOG_LEVEL"]
     server = _server_from(server_raw)
