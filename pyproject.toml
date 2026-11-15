@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rtsp2jpeg"
-version = "0.2.0"
+version = "0.2.1"
 description = "RTSP-Kamerabilder als JPEG-Einzelbild ueber HTTP -- fuer die Kamera-URL einer STARFACE-Tuersprechstelle"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = ["PyYAML>=6.0,<7"]
 
@@ -28,7 +28,7 @@ filterwarnings = ["error"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "C4", "RUF"]

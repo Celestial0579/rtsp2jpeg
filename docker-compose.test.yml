@@ -7,7 +7,7 @@
 
 services:
   rtsp-server:
-    image: bluenviron/mediamtx:latest
+    image: bluenviron/mediamtx:1.21.3@sha256:59e43552f3be43695b70c19424dc2a42fcec18075f88d91561a24ac5d70a586c
     healthcheck:
       test: ["CMD", "/mediamtx", "--version"]
       interval: 2s
@@ -40,7 +40,7 @@ services:
       CAMERA_URL: rtsp://rtsp-server:8554/tuer
       CAMERA_NAME: tuer
       TOKEN: ${TEST_TOKEN:-pruef-token}
-      TRUST_PROXY: "1"
+      TRUST_PROXY: "172.29.81.200"
       LOG_LEVEL: DEBUG
       PORT: "8080"
 
@@ -52,3 +52,16 @@ services:
     build: ./tests/proxy
     depends_on:
       - rtsp2jpeg
+    networks:
+      default:
+        # Feste Adresse: rtsp2jpeg vertraut X-Forwarded-For nur von hier.
+        ipv4_address: 172.29.81.200
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.81.0/24
+          # Automatisch vergeben wird nur die untere Haelfte; die feste
+          # Adresse des Proxys liegt darueber und ist so nie schon belegt.
+          ip_range: 172.29.81.0/25

@@ -50,7 +50,32 @@ class TestFehltDerZugangsschutz:
         assert fehlt_der_zugangsschutz(baue(token="a" * 48)) is None
 
     def test_mit_basic_auth_in_ordnung(self):
-        assert fehlt_der_zugangsschutz(baue(basic_auth="u:p")) is None
+        assert fehlt_der_zugangsschutz(baue(basic_auth="u:" + "p" * 16)) is None
+
+    def test_token_mit_genau_24_zeichen_genuegt(self):
+        assert fehlt_der_zugangsschutz(baue(token="a" * 24)) is None
+
+    @pytest.mark.parametrize("kwargs, muster", [
+        ({"token": "a" * 23}, "Token ist zu kurz"),
+        ({"token": " "}, "Leerraum"),
+        ({"token": "a" * 48 + "\n"}, "Leerraum"),
+        ({"basic_auth": "u:" + "p" * 15}, "Passwort in basic_auth ist zu kurz"),
+        ({"basic_auth": "u:" + "p" * 16 + "\n"}, "Leerraum"),
+        ({"token": "a" * 48, "basic_auth": "u:kurz"}, "basic_auth ist zu kurz"),
+        ({"token": "kurz", "allow_anonymous": True}, "Token ist zu kurz"),
+    ])
+    def test_zu_schwach_startet_nicht(self, kwargs, muster):
+        grund = fehlt_der_zugangsschutz(baue(**kwargs))
+        assert grund is not None
+        assert muster in grund
+        assert "startet nicht" in grund
+        assert "kurz\n" not in grund and "pppp" not in grund   # Wert nie im Text
+
+    def test_kurzes_token_beendet_den_start(self, monkeypatch, capsys):
+        monkeypatch.setenv("CAMERA_URL", "rtsp://h/s")
+        monkeypatch.setenv("TOKEN", "kurz")
+        assert main(["--check"]) == 3
+        assert "zu kurz" in capsys.readouterr().err
 
     def test_ausdruecklich_offen_ist_erlaubt(self):
         assert fehlt_der_zugangsschutz(baue(allow_anonymous=True)) is None
