@@ -180,7 +180,10 @@ class TestLoadConfig:
             ("port: '8080'", "server.port muss eine ganze Zahl"),
             ("port: true", "server.port muss eine ganze Zahl"),
             ("port: 70000", "server.port muss zwischen"),
-            ("trust_proxy: 'false'", "server.trust_proxy muss true oder false"),
+            ("trust_proxy: 'false'", "server.trust_proxy"),
+            ("trust_proxy: true", "Adresse des eigenen Proxys"),
+            ("trust_proxy: 12345", "server.trust_proxy muss eine IPv4-Adresse"),
+            ("allow_from: [12345]", "server.allow_from muss eine IPv4-Adresse"),
             ("access_log: 1", "server.access_log muss true oder false"),
         ],
     )
@@ -256,6 +259,38 @@ class TestAllowAnonymous:
     def test_trust_proxy_ebenso(self):
         with pytest.raises(ConfigError, match="TRUST_PROXY"):
             load_config(None, {"CAMERA_URL": "rtsp://h/s", "TRUST_PROXY": "vielleicht"})
+
+    @pytest.mark.parametrize("wert", ["1", "true", "ja"])
+    def test_trust_proxy_braucht_eine_adresse(self, wert):
+        with pytest.raises(ConfigError, match=r"TRUST_PROXY.*Adresse des eigenen Proxys"):
+            load_config(None, {"CAMERA_URL": "rtsp://h/s", "TRUST_PROXY": wert})
+
+    @pytest.mark.parametrize("wert, erwartet", [
+        ("0", ()), ("", ()), ("172.18.0.2", ("172.18.0.2/32",)),
+        ("172.18.0.0/16, 10.0.0.1", ("172.18.0.0/16", "10.0.0.1/32")),
+    ])
+    def test_trust_proxy_aus_der_umgebung(self, wert, erwartet):
+        config = load_config(None, {"CAMERA_URL": "rtsp://h/s", "TRUST_PROXY": wert})
+        assert tuple(str(n) for n in config.server.trust_proxy) == erwartet
+
+    @pytest.mark.parametrize("wert", ["0.0.0.0/0", "10.0.0.5/24", "::1", "proxy"])
+    def test_trust_proxy_unzulaessig(self, wert):
+        with pytest.raises(ConfigError, match="TRUST_PROXY"):
+            load_config(None, {"CAMERA_URL": "rtsp://h/s", "TRUST_PROXY": wert})
+
+    def test_allow_from_aus_datei_und_umgebung(self, tmp_path):
+        path = write(tmp_path, "server: {allow_from: [192.168.1.10, 10.0.0.0/24]}\n"
+                               "cameras: {a: {url: 'rtsp://h/a'}}")
+        config = load_config(path, {})
+        assert [str(n) for n in config.server.allow_from] == ["192.168.1.10/32",
+                                                               "10.0.0.0/24"]
+        config = load_config(None, {"CAMERA_URL": "rtsp://h/s", "ALLOW_FROM": "192.168.1.10"})
+        assert [str(n) for n in config.server.allow_from] == ["192.168.1.10/32"]
+        assert load_config(None, {"CAMERA_URL": "rtsp://h/s"}).server.allow_from == ()
+
+    def test_allow_from_unzulaessig(self):
+        with pytest.raises(ConfigError, match="ALLOW_FROM"):
+            load_config(None, {"CAMERA_URL": "rtsp://h/s", "ALLOW_FROM": "tuerkamera"})
 
     def test_kaputter_port_aus_der_umgebung(self):
         with pytest.raises(ConfigError, match="PORT"):
