@@ -44,6 +44,12 @@ class TestRedactUrl:
             ("rtsp://u:ge/heim@host/s", "rtsp://u:***@host/s"),   # / im Passwort
             ("rtsp://u:@host/s", "rtsp://u:***@host/s"),
             ("rtsp://nurbenutzer@host/s", "rtsp://nurbenutzer@host/s"),
+            ("rtsp://host/s?user=admin&pwd=geheim1", "rtsp://host/s?user=***&pwd=***"),
+            ("rtsp://host:554/user=admin&password=geheim1&channel=1&stream=0.sdp",
+             "rtsp://host:554/user=***&password=***&channel=***&stream=***"),
+            ("rtsp://u:geheim@host/s?pwd=geheim2;x=1", "rtsp://u:***@host/s?pwd=***;x=***"),
+            ("http://host/s?pwd=geheim1#teil", "http://host/s?pwd=***#teil"),
+            ("admin:geheim@host/s", "admin:***@host/s"),   # ohne Schema
         ],
     )
     def test_passwort_verschwindet(self, url, erwartet):
@@ -69,6 +75,35 @@ class TestRedactText:
 
     def test_fremde_urls_im_text(self):
         assert "geheim" not in redact_text("http://x:geheim@andere/pfad")
+
+    def test_werte_aus_dem_abfrageteil(self):
+        url = "rtsp://192.168.1.50:554/s?user=admin&pwd=ge%2Bheim%26x"
+        for meldung in (f"Fehler bei {url}", "Anmeldung mit ge+heim&x scheiterte",
+                        "roh: ge%2Bheim%26x"):
+            ergebnis = redact_text(meldung, url)
+            assert "heim" not in ergebnis, ergebnis
+
+    def test_werte_aus_dem_pfad(self):
+        url = "rtsp://h:554/user=admin&password=streng-geheim&channel=1&stream=0.sdp"
+        assert "streng-geheim" not in redact_text("401 fuer streng-geheim", url)
+
+    def test_kurzer_wert_nur_bei_geheimem_namen(self):
+        url = "rtsp://h/s?pwd=ab&channel=1"
+        ergebnis = redact_text("pwd ab, Kanal 1, Exit-Code 1", url)
+        assert " ab," not in ergebnis
+        assert "Kanal 1" in ergebnis
+
+    def test_fremde_urls_mit_abfrage_im_text(self):
+        assert "geheim" not in redact_text("weitergeleitet nach http://andere/x?token=geheim")
+
+    def test_kamera_schwaerzt_eigene_argumente(self):
+        kamera = CameraConfig(
+            name="t", url="rtsp://h/s",
+            input_args=["-headers", "Authorization: Basic c3RyZW5nLWdlaGVpbQ=="],
+        )
+        ergebnis = kamera.redact("Kopfzeile Authorization: Basic c3RyZW5nLWdlaGVpbQ== abgelehnt")
+        assert "c3RyZW5nLWdlaGVpbQ" not in ergebnis
+        assert "-headers" not in kamera.redact("") and "abgelehnt" in ergebnis
 
     def test_kamera_schwaerzt_sich_selbst(self):
         kamera = CameraConfig(name="t", url="rtsp://a:streng-geheim@h/s")

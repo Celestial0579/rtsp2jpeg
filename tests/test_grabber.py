@@ -56,6 +56,16 @@ class TestSplitJpegs:
 
 
 class TestBuildCommand:
+    def test_fuers_protokoll_ohne_zugangsdaten(self):
+        kamera = CameraConfig(name="t", url="rtsp://a:geheim1@host/s?pwd=geheim2",
+                              input_args=["-headers", "X: geheim3"],
+                              output_args=["-metadata", "geheim4"])
+        echt = build_command(kamera, ffmpeg="/bin/ffmpeg")
+        protokoll = build_command(kamera, ffmpeg="/bin/ffmpeg", fuers_protokoll=True)
+        assert len(protokoll) == len(echt)
+        assert "geheim" not in " ".join(protokoll)
+        assert "rtsp://a:***@host/s?pwd=***" in protokoll
+
     def make(self, **kwargs) -> CameraConfig:
         return CameraConfig(name="t", url="rtsp://host/s", **kwargs)
 
@@ -297,6 +307,29 @@ class TestGrabber:
             grabber.stop()
         assert "rtsp://admin:***@host/s" in caplog.text
         assert "streng-geheim" not in caplog.text
+
+    def test_keine_zugangsdaten_aus_abfrage_und_argumenten_im_protokoll(
+            self, fake_ffmpeg, monkeypatch, caplog):
+        """INFO und DEBUG: Abfrageteil der URL und eigene Argumente bleiben draussen."""
+        url = "rtsp://host:554/s?user=admin&pwd=streng-geheim"
+        monkeypatch.setenv("FAKE_STDERR", f"{url}: 401 Unauthorized")
+        grabber = Grabber(
+            camera(url=url, input_args=["-headers", "Authorization: Basic Z2VoZWltZXI="],
+                   output_args=["-metadata", "kopie=noch-geheimer"]),
+            ffmpeg=fake_ffmpeg,
+        )
+        try:
+            with caplog.at_level("DEBUG"):
+                grabber.get_frame()
+                deadline = time.monotonic() + 2.0
+                while not grabber._stderr and time.monotonic() < deadline:
+                    time.sleep(0.05)
+        finally:
+            grabber.stop()
+        assert "rtsp://host:554/s?user=***&pwd=***" in caplog.text
+        for geheim in ("streng-geheim", "Z2VoZWltZXI", "noch-geheimer"):
+            assert geheim not in caplog.text, geheim
+            assert geheim not in " ".join(grabber._stderr), geheim
 
     def test_fehlermeldung_enthaelt_keine_kameradetails(self, fake_ffmpeg, monkeypatch):
         monkeypatch.setenv("FAKE_START_DELAY", "30")

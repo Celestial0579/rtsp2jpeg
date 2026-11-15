@@ -260,7 +260,10 @@ ffprobe "rtsp://benutzer:passwort@192.168.1.50:554/stream1"
 ```
 
 Kamera-Passwörter werden in allen Protokollzeilen geschwärzt, auch in
-Meldungen von ffmpeg. Das Zugriffsprotokoll enthält nur den Pfad, nie den
+Meldungen von ffmpeg: das Passwort aus `benutzer:passwort@`, alle Werte nach
+`=` in Pfad und Abfrageteil der Kamera-URL (`?user=…&pwd=…`) und die eigenen
+Argumente aus `input_args` und `output_args`, die auf DEBUG nur als `***`
+erscheinen. Das Zugriffsprotokoll enthält nur den Pfad, nie den
 Abfrageteil mit dem Token. Der Docker-Healthcheck prüft nur, ob der Dienst
 Verbindungen annimmt.
 

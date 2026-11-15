@@ -59,8 +59,15 @@ def split_jpegs(buffer: bytearray) -> tuple[list[bytes], bytearray]:
     return frames, bytearray(buffer[start:])
 
 
-def build_command(camera: CameraConfig, ffmpeg: str | None = None) -> list[str]:
-    """Baut die ffmpeg-Befehlszeile fuer eine Kamera."""
+def build_command(camera: CameraConfig, ffmpeg: str | None = None, *,
+                  fuers_protokoll: bool = False) -> list[str]:
+    """Baut die ffmpeg-Befehlszeile fuer eine Kamera.
+
+    ``fuers_protokoll`` liefert dieselbe Zeile mit geschwaerzter URL und
+    ``***`` statt der eigenen Argumente -- die koennen Zugangsdaten tragen.
+    """
+    def eigene(args: list[str]) -> list[str]:
+        return ["***"] * len(args) if fuers_protokoll else list(args)
     filters = [f"fps={camera.fps:g}"]
     if camera.rotate in (90, 270):
         filters.append("transpose=1" if camera.rotate == 90 else "transpose=2")
@@ -86,14 +93,14 @@ def build_command(camera: CameraConfig, ffmpeg: str | None = None) -> list[str]:
         cmd += ["-rtsp_transport", camera.transport, "-timeout", read_timeout_us]
     else:
         cmd += ["-rw_timeout", read_timeout_us]
-    cmd += camera.input_args
+    cmd += eigene(camera.input_args)
     cmd += [
-        "-i", camera.url,
+        "-i", camera.redacted_url if fuers_protokoll else camera.url,
         "-an", "-sn", "-dn",
         "-vf", ",".join(filters),
         "-q:v", str(camera.quality),
     ]
-    cmd += camera.output_args
+    cmd += eigene(camera.output_args)
     cmd += ["-f", "mjpeg", "pipe:1"]
     return cmd
 
@@ -269,7 +276,8 @@ class Grabber:
         cmd = build_command(self.camera, self._ffmpeg)
         log.info("Kamera %s: starte ffmpeg fuer %s",
                  self.camera.name, self.camera.redacted_url)
-        log.debug("Kamera %s: %s", self.camera.name, self.camera.redact(" ".join(cmd)))
+        log.debug("Kamera %s: %s", self.camera.name, self.camera.redact(
+            " ".join(build_command(self.camera, self._ffmpeg, fuers_protokoll=True))))
 
         try:
             process = subprocess.Popen(

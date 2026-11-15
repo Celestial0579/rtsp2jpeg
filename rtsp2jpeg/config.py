@@ -74,12 +74,12 @@ class CameraConfig:
 
     @property
     def redacted_url(self) -> str:
-        """URL ohne Passwort -- fuer das Protokoll."""
+        """URL ohne Passwort und ohne Werte nach ``=`` -- fuer das Protokoll."""
         return redact_url(self.url)
 
     def redact(self, text: str) -> str:
         """Entfernt die Zugangsdaten dieser Kamera aus beliebigem Text."""
-        return redact_text(text, self.url)
+        return redact_text(text, self.url, self.input_args + self.output_args)
 
 
 @dataclass(frozen=True)
@@ -170,41 +170,76 @@ _TRUST_PROXY_TRUE = (
 
 
 def redact_url(url: str) -> str:
-    """Ersetzt das Passwort in ``rtsp://user:pass@host/...`` durch ``***``.
+    """URL fuer das Protokoll: Passwort und alle Werte nach ``=`` werden ``***``.
 
-    Massgeblich ist das letzte ``@`` -- ein Passwort darf selbst ``@`` oder
-    ``/`` enthalten. Im Zweifel wird lieber zu viel geschwaerzt als zu wenig.
+    Zugangsdaten stehen nicht nur in ``user:pass@``, sondern oft auch im
+    Abfrageteil (``?user=..&pwd=..``) oder im Pfad (``/user=..&password=..``).
+    Massgeblich fuer das Passwort ist das letzte ``@`` -- ein Passwort darf
+    selbst ``@`` oder ``/`` enthalten. Im Zweifel wird lieber zu viel
+    geschwaerzt als zu wenig.
     """
     scheme, sep, rest = url.partition("://")
-    if not sep or "@" not in rest:
-        return url
-    userinfo, _, host = rest.rpartition("@")
-    user, colon, _ = userinfo.partition(":")
-    return f"{scheme}://{user}{':***' if colon else ''}@{host}"
+    if not sep:  # auch ohne Schema -- etwa in einer Fehlermeldung
+        rest = url
+    anfang = f"{scheme}://" if sep else ""
+    if "@" in rest:
+        userinfo, _, rest = rest.rpartition("@")
+        user, colon, _ = userinfo.partition(":")
+        anfang += f"{user}{':***' if colon else ''}@"
+    return anfang + _WERT.sub("=***", rest)
+
+
+# Ein Wert nach "=" bis zum naechsten Trenner -- im Abfrageteil wie im Pfad.
+_WERT = re.compile(r"=[^&;/?#\s]*")
+_WERT_MIT_NAME = re.compile(r"([^&;/?#=\s]*)=([^&;/?#\s]*)")
+# Bei diesen Namen wird jeder Wert geschwaerzt, sonst erst ab drei Zeichen --
+# "channel=1" soll nicht jede 1 in einer ffmpeg-Meldung tilgen.
+_GEHEIMER_NAME = re.compile(r"pass|pwd|token|key|secret|auth|sig|cred", re.IGNORECASE)
+
+
+def _varianten(wert: str) -> set[str]:
+    return {wert, unquote(wert), unquote(wert.replace("+", " "))} - {""}
 
 
 def _secrets_of(url: str) -> list[str]:
-    """Passwort einer URL, roh und dekodiert -- leer, wenn es keins gibt."""
+    """Passwort und Werte einer URL, roh und dekodiert, laengste zuerst."""
     _, sep, rest = url.partition("://")
-    if not sep or "@" not in rest:
-        return []
-    userinfo = rest.rpartition("@")[0]
-    _, colon, password = userinfo.partition(":")
-    if not colon or not password:
-        return []
-    return sorted({password, unquote(password)}, key=len, reverse=True)
+    if not sep:
+        rest = url
+    gefunden: set[str] = set()
+    if "@" in rest:
+        userinfo, _, rest = rest.rpartition("@")
+        _, colon, password = userinfo.partition(":")
+        if colon and password:
+            gefunden |= _varianten(password)
+    for name, wert in _WERT_MIT_NAME.findall(rest):
+        if len(wert) >= 3 or (wert and _GEHEIMER_NAME.search(name)):
+            gefunden |= _varianten(wert)
+    return sorted(gefunden, key=len, reverse=True)
 
 
-_USERINFO_IN_TEXT = re.compile(r"(\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]*:)[^\s@]*@")
+def _args_secrets(args: list[str]) -> list[str]:
+    """Eigene ffmpeg-Argumente koennen Kopfzeilen samt Zugangsdaten tragen."""
+    gefunden: set[str] = set()
+    for arg in args:
+        if len(arg) >= 3 and not arg.startswith("-"):
+            gefunden |= _varianten(arg)
+    return sorted(gefunden, key=len, reverse=True)
 
 
-def redact_text(text: str, url: str | None = None) -> str:
+_URL_IN_TEXT = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S+")
+
+
+def redact_text(text: str, url: str | None = None,
+                args: list[str] | None = None) -> str:
     """Schwaerzt Zugangsdaten in Text, etwa in einer Meldung von ffmpeg."""
     if url:
         text = text.replace(url, redact_url(url))
         for secret in _secrets_of(url):
             text = text.replace(secret, "***")
-    return _USERINFO_IN_TEXT.sub(r"\1***@", text)
+    for secret in _args_secrets(args or []):
+        text = text.replace(secret, "***")
+    return _URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)), text)
 
 
 _CAMERA_FIELDS = {
