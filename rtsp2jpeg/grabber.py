@@ -130,6 +130,9 @@ class Grabber:
         self._stderr: collections.deque[str] = collections.deque(maxlen=_STDERR_KEEP)
         self._restarts = 0
         self._last_error: str | None = None
+        # ffmpeg ist ohne frisches Bild ausgestiegen: Anfragen warten dann
+        # nicht bis ``timeout``, sondern bekommen sofort ihre Absage.
+        self._ausfall = False
 
     # -- Steuerung ---------------------------------------------------------
 
@@ -161,6 +164,8 @@ class Grabber:
             self._last_request = time.monotonic()
             if not self._wanted:
                 self._wanted = True
+                # Neuer Anlauf nach dem Leerlauf: alter Ausfall zaehlt nicht.
+                self._ausfall = False
                 self._cond.notify_all()
 
     # -- Abruf -------------------------------------------------------------
@@ -173,7 +178,8 @@ class Grabber:
         """Liefert ein Bild, das hoechstens ``max_age`` Sekunden alt ist.
 
         Wirft ``TimeoutError``, wenn innerhalb von ``timeout`` kein
-        ausreichend frisches Bild eintrifft.
+        ausreichend frisches Bild eintrifft -- oder sofort, wenn ffmpeg
+        seit dem letzten Bild ausgestiegen ist.
         """
         max_age = self.camera.max_age if max_age is None else max_age
         timeout = self.camera.timeout if timeout is None else timeout
@@ -187,14 +193,15 @@ class Grabber:
                 frame = self._frame
                 if frame is not None and frame.age <= max_age:
                     return frame
+                if self._ausfall:
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 self._cond.wait(remaining)
 
         raise TimeoutError(
-            f"Kamera {self.camera.name!r}: innerhalb von {timeout:g}s kein "
-            f"Bild juenger als {max_age:g}s"
+            f"Kamera {self.camera.name!r}: kein Bild juenger als {max_age:g}s"
         )
 
     # -- Zustand (nur innerhalb des Prozesses, nie nach aussen) -------------
@@ -242,6 +249,8 @@ class Grabber:
                     backoff = _BACKOFF_START
                     continue
                 self._restarts += 1
+                self._ausfall = True
+                self._cond.notify_all()
 
             # Lief der Prozess laenger als eine Minute, war es kein
             # Startproblem -- dann sofort wieder versuchen.
@@ -337,6 +346,7 @@ class Grabber:
         with self._cond:
             self._frame = Frame(data=data, timestamp=time.monotonic())
             self._last_error = None
+            self._ausfall = False
             self._cond.notify_all()
 
     def _note_error(self, message: str) -> None:

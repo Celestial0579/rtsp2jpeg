@@ -167,6 +167,44 @@ class TestGrabber:
         finally:
             grabber.stop()
 
+    def test_kamera_aus_ergibt_sofort_eine_absage(self, fake_ffmpeg, monkeypatch):
+        """Steigt ffmpeg ohne Bild aus, wartet niemand bis ``timeout`` (#19)."""
+        monkeypatch.setenv("FAKE_FRAMES", "-1")  # kein einziges Bild
+        monkeypatch.setenv("FAKE_EXIT_CODE", "1")
+        grabber = Grabber(camera(timeout=4.0), ffmpeg=fake_ffmpeg)
+        try:
+            beginn = time.monotonic()
+            with pytest.raises(TimeoutError):
+                grabber.get_frame()
+            assert time.monotonic() - beginn < 2.0
+            # Auch waehrend der Pause bis zum naechsten Versuch: sofort.
+            beginn = time.monotonic()
+            with pytest.raises(TimeoutError):
+                grabber.get_frame()
+            assert time.monotonic() - beginn < 0.5
+        finally:
+            grabber.stop()
+
+    def test_kamera_wieder_da_liefert_wieder_bilder(self, fake_ffmpeg, monkeypatch):
+        monkeypatch.setenv("FAKE_FRAMES", "-1")
+        monkeypatch.setenv("FAKE_EXIT_CODE", "1")
+        grabber = Grabber(camera(timeout=4.0), ffmpeg=fake_ffmpeg)
+        try:
+            with pytest.raises(TimeoutError):
+                grabber.get_frame()
+            monkeypatch.setenv("FAKE_FRAMES", "0")
+            monkeypatch.setenv("FAKE_EXIT_CODE", "0")
+            deadline = time.monotonic() + 8.0
+            while True:
+                try:
+                    assert is_jpeg(grabber.get_frame().data)
+                    break
+                except TimeoutError:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.2)
+        finally:
+            grabber.stop()
+
     def test_neustart_nach_abbruch(self, fake_ffmpeg, monkeypatch):
         """Bricht ffmpeg weg, verbindet sich der Greifer neu."""
         monkeypatch.setenv("FAKE_FRAMES", "2")

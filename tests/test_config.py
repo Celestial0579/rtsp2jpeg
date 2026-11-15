@@ -313,3 +313,8 @@ class TestAllowAnonymous:
     def test_kaputter_port_aus_der_umgebung(self):
         with pytest.raises(ConfigError, match="PORT"):
             load_config(None, {"CAMERA_URL": "rtsp://h/s", "PORT": "acht"})
+
+
+def test_vorgabe_fuer_timeout_bleibt_unter_der_starface_grenze():
+    """Die STARFACE wartet hoechstens 5 s auf das Bild (#19)."""
+    assert CameraConfig(name="t", url="rtsp://host/s").timeout < 5
