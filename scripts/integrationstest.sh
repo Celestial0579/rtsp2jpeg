@@ -232,6 +232,27 @@ test \"\$(id -u)\" != 0"
 pruefe "kein Passwort in den Protokollen" bash -c "
 ! ${COMPOSE[*]} logs rtsp2jpeg 2>&1 | grep -i 'pruef-token'"
 
+# Ohne rtsp2jpeg antwortet der Proxy mit 502 und schreibt einen Fehlereintrag
+# samt angefragter URL -- das Token darf darin nicht stehen.
+pruefe "kein Token im Protokoll des Proxys, auch bei Fehlerantworten" bash -c "
+${COMPOSE[*]} stop rtsp2jpeg >/dev/null 2>&1
+${COMPOSE[*]} exec -T test-kamera python -c \"
+import urllib.error, urllib.request
+try:
+    urllib.request.urlopen('http://proxy/cam/tuer.jpg?token=$TOKEN', timeout=10)
+except urllib.error.HTTPError as e:
+    assert e.code >= 500, e.code
+else:
+    raise SystemExit('ohne Dienst kam ein Bild')
+\"
+rc=\$?
+${COMPOSE[*]} start rtsp2jpeg >/dev/null 2>&1
+[[ \$rc -eq 0 ]] || exit 1
+protokoll=\$(${COMPOSE[*]} logs --no-log-prefix proxy 2>&1)
+echo \"\$protokoll\" | grep -q 'http.log.error' || { echo 'kein Fehlereintrag'; exit 1; }
+echo \"\$protokoll\" | grep -q 'token=REDACTED' || { echo 'Filter greift nicht'; exit 1; }
+! echo \"\$protokoll\" | grep -qF '$TOKEN'"
+
 echo
 echo "--- Kennzahlen (nur zur Information) ---"
 "${COMPOSE[@]}" restart rtsp2jpeg >/dev/null 2>&1 || true

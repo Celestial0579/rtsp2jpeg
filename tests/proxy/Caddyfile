@@ -3,6 +3,21 @@
 {
     admin off
     auto_https off
+
+    # Fehlermeldungen von Caddy (etwa 502, solange rtsp2jpeg neu startet)
+    # nennen die angefragte URL. Das Token darin wird vor dem Schreiben
+    # ersetzt.
+    log default {
+        output stderr
+        format filter {
+            wrap json
+            fields {
+                request>uri query {
+                    replace token REDACTED
+                }
+            }
+        }
+    }
 }
 
 :80 {
