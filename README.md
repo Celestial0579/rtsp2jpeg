@@ -260,7 +260,9 @@ scripts/integrationstest.sh
 ```
 
 Dasselbe läuft als GitHub-CI. Auf `main` veröffentlicht sie das Abbild als
-`ghcr.io/celestial0579/rtsp2jpeg`; Pull Requests bauen es nur.
+`ghcr.io/celestial0579/rtsp2jpeg:latest`, ein Release-Tag `v1.2.3` zusätzlich
+als `:1.2.3`; Pull Requests bauen es nur. Montags wird das Abbild neu gebaut,
+damit Basisabbild und ffmpeg aktuell bleiben.
 
 ## Was ungetestet ist
 
