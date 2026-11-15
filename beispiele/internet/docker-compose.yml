@@ -26,6 +26,17 @@ services:
         ipv4_address: 172.29.80.200
     depends_on:
       - rtsp2jpeg
+    # Schreiben darf Caddy nur in /data, /config und /tmp; von den
+    # Sonderrechten bleibt nur das Binden von Port 80 und 443.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
 
   rtsp2jpeg:
     image: ghcr.io/celestial0579/rtsp2jpeg:0.2.2
