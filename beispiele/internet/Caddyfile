@@ -26,8 +26,6 @@ tuerkamera.example.de {
         respond "Nicht verfuegbar" 404
     }
 
-    log {
-        output file /var/log/caddy/zugriff.log
-        format console
-    }
+    # Absichtlich kein Zugriffsprotokoll: Caddy schriebe die ganze URL
+    # hinein, also auch das Token aus ?token=...
 }

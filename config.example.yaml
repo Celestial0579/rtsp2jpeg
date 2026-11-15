@@ -25,10 +25,14 @@ server:
   token: ${RTSP2JPEG_TOKEN}
   # basic_auth: "starface:geheim"
 
-  # Nur einschalten, wenn wirklich ein Proxy davorsteht (siehe
-  # beispiele/internet/). Sonst koennte jeder seine Herkunft per
-  # X-Forwarded-For frei erfinden.
-  trust_proxy: false
+  # Adresse(n) des eigenen Proxys (siehe beispiele/internet/). Nur von dort
+  # wertet der Dienst X-Forwarded-For aus; alle anderen Gegenstellen zaehlen
+  # mit ihrer echten Adresse. Ein blosses true startet nicht.
+  # trust_proxy: 172.29.80.2
+
+  # Nur diese Gegenstellen bedienen, etwa die STARFACE oder den Proxy;
+  # alle anderen Verbindungen schliesst der Dienst sofort. Leer = alle.
+  # allow_from: [192.168.1.20]
 
   # Nur setzen, wenn der Dienst bewusst ohne jeden Zugangsschutz laufen soll.
   # Schalter sind echte Wahrheitswerte: true oder false, ohne

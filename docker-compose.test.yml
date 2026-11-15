@@ -40,7 +40,7 @@ services:
       CAMERA_URL: rtsp://rtsp-server:8554/tuer
       CAMERA_NAME: tuer
       TOKEN: ${TEST_TOKEN:-pruef-token}
-      TRUST_PROXY: "1"
+      TRUST_PROXY: "172.29.81.2"
       LOG_LEVEL: DEBUG
       PORT: "8080"
 
@@ -52,3 +52,13 @@ services:
     build: ./tests/proxy
     depends_on:
       - rtsp2jpeg
+    networks:
+      default:
+        # Feste Adresse: rtsp2jpeg vertraut X-Forwarded-For nur von hier.
+        ipv4_address: 172.29.81.2
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.81.0/24
