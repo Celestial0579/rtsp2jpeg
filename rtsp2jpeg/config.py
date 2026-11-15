@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
@@ -86,7 +87,10 @@ class ServerConfig:
     port: int = 8080
     token: str | None = None
     basic_auth: str | None = None       # "benutzer:passwort"
-    trust_proxy: bool = False           # X-Forwarded-For auswerten (nur hinter Proxy)
+    # Adressen des eigenen Proxys: nur von dort zaehlt X-Forwarded-For.
+    trust_proxy: tuple[ipaddress.IPv4Network, ...] = ()
+    # Nur diese Gegenstellen werden bedient; leer heisst: alle.
+    allow_from: tuple[ipaddress.IPv4Network, ...] = ()
     allow_anonymous: bool = False       # Betrieb ganz ohne Zugangsschutz zulassen
     log_level: str = "INFO"
     access_log: bool = True
@@ -96,6 +100,59 @@ class ServerConfig:
 class Config:
     server: ServerConfig
     cameras: dict[str, CameraConfig]
+
+
+Netze = tuple[ipaddress.IPv4Network, ...]
+
+
+def im_netz(adresse: str, netze: Netze) -> bool:
+    """Liegt ``adresse`` in einem der Netze? Unlesbares gilt als nein."""
+    try:
+        ip = ipaddress.IPv4Address(adresse)
+    except ValueError:
+        return False
+    return any(ip in netz for netz in netze)
+
+
+def netze(value: Any, key: str, *, ganz_offen: bool = True) -> Netze:
+    """Adressen und Netze aus Text (``"a, b"``) oder einer Liste davon.
+
+    Ohne Praefix ist eine einzelne Adresse gemeint. Hostbits im Netz
+    (``10.0.0.5/24``) gelten als Tippfehler und verhindern den Start.
+    """
+    if value is None or value is False:
+        return ()
+    if isinstance(value, str):
+        teile = [t.strip() for t in value.split(",")]
+        teile = [t for t in teile if t]
+    elif isinstance(value, list) and all(isinstance(t, str) for t in value):
+        teile = [t.strip() for t in value]
+    else:
+        raise ConfigError(
+            f"{key} muss eine IPv4-Adresse, ein IPv4-Netz oder eine Liste davon "
+            f"sein -- der Dienst startet nicht"
+        )
+    ergebnis = []
+    for teil in teile:
+        try:
+            netz = ipaddress.IPv4Network(teil, strict=True)
+        except ValueError as exc:
+            raise ConfigError(
+                f"{key}: {teil!r} ist weder IPv4-Adresse noch IPv4-Netz "
+                f"(etwa 172.18.0.2 oder 10.0.0.0/24) -- der Dienst startet nicht"
+            ) from exc
+        if netz.prefixlen == 0 and not ganz_offen:
+            raise ConfigError(
+                f"{key}: {teil!r} umfasst alle Adressen -- der Dienst startet nicht"
+            )
+        ergebnis.append(netz)
+    return tuple(ergebnis)
+
+
+_TRUST_PROXY_TRUE = (
+    "trust_proxy braucht die Adresse des eigenen Proxys statt true, etwa "
+    "172.18.0.2 oder 172.18.0.0/16 -- der Dienst startet nicht"
+)
 
 
 def redact_url(url: str) -> str:
@@ -261,7 +318,6 @@ _SERVER_FIELDS: dict[str, type] = {
     "port": int,
     "token": str,
     "basic_auth": str,
-    "trust_proxy": bool,
     "allow_anonymous": bool,
     "log_level": str,
     "access_log": bool,
@@ -288,14 +344,25 @@ def _check_type(key: str, value: Any, want: type) -> None:
         raise ConfigError(f"server.{key} muss Text sein (ist {type(value).__name__})")
 
 
+_SERVER_NETZE = ("trust_proxy", "allow_from")
+
+
 def _server_from(raw: dict[str, Any]) -> ServerConfig:
     raw = {k: v for k, v in raw.items() if k not in _SERVER_OBSOLETE}
-    unknown = set(raw) - set(_SERVER_FIELDS)
+    unknown = set(raw) - set(_SERVER_FIELDS) - set(_SERVER_NETZE)
     if unknown:
         raise ConfigError(f"server: unbekannte Einstellung(en) {sorted(unknown)}")
 
     values = {k: v for k, v in raw.items() if v is not None}
     for key, value in values.items():
+        if key in _SERVER_NETZE:
+            if isinstance(value, tuple):  # schon aus der Umgebung gelesen
+                continue
+            if key == "trust_proxy" and value is True:
+                raise ConfigError(f"server.{_TRUST_PROXY_TRUE}")
+            values[key] = netze(value, f"server.{key}",
+                                ganz_offen=key != "trust_proxy")
+            continue
         _check_type(key, value, _SERVER_FIELDS[key])
 
     basic = values.get("basic_auth")
@@ -364,7 +431,15 @@ def load_config(path: str | None = None, environ: dict[str, str] | None = None) 
     if "BASIC_AUTH" in env:
         server_raw["basic_auth"] = env["BASIC_AUTH"] or None
     if "TRUST_PROXY" in env:
-        server_raw["trust_proxy"] = _env_switch("TRUST_PROXY", env["TRUST_PROXY"])
+        wert = env["TRUST_PROXY"]
+        if wert.strip().lower() in _TRUE:
+            raise ConfigError(f"TRUST_PROXY: {_TRUST_PROXY_TRUE}")
+        if wert.strip().lower() in _FALSE:
+            server_raw["trust_proxy"] = ()
+        else:
+            server_raw["trust_proxy"] = netze(wert, "TRUST_PROXY", ganz_offen=False)
+    if "ALLOW_FROM" in env:
+        server_raw["allow_from"] = netze(env["ALLOW_FROM"], "ALLOW_FROM")
     if "ALLOW_ANONYMOUS" in env:
         server_raw["allow_anonymous"] = _env_switch("ALLOW_ANONYMOUS", env["ALLOW_ANONYMOUS"])
     if "LOG_LEVEL" in env:

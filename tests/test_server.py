@@ -10,16 +10,16 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from rtsp2jpeg.config import CameraConfig, Config, ServerConfig
+from rtsp2jpeg.config import CameraConfig, Config, ServerConfig, netze
 from rtsp2jpeg.grabber import GrabberPool
-from rtsp2jpeg.server import Bremse, make_server
+from rtsp2jpeg.server import make_server
 
 from .conftest import is_jpeg
 
 
 @contextmanager
-def dienst(fake_ffmpeg, cameras=None, *, max_verbindungen=32, lesefrist=5.0,
-           bremse=None, **server_kwargs):
+def dienst(fake_ffmpeg, cameras=None, *, max_verbindungen=32, max_je_gegenstelle=8,
+           lesefrist=5.0, kopffrist=2.0, bremse=None, **server_kwargs):
     """Startet den HTTP-Dienst auf einem freien Port."""
     cameras = cameras or {
         "tuer": CameraConfig(
@@ -33,7 +33,8 @@ def dienst(fake_ffmpeg, cameras=None, *, max_verbindungen=32, lesefrist=5.0,
     pool = GrabberPool(cameras, ffmpeg=fake_ffmpeg)
     pool.start()
     server = make_server(config, pool, max_verbindungen=max_verbindungen,
-                         lesefrist=lesefrist, bremse=bremse)
+                         max_je_gegenstelle=max_je_gegenstelle, lesefrist=lesefrist,
+                         kopffrist=kopffrist, bremse=bremse)
     thread = threading.Thread(
         target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
     )
@@ -66,14 +67,16 @@ def hole_fehler(url: str, timeout: float = 15.0, **kwargs):
     raise AssertionError(f"Anfrage {url} war unerwartet erfolgreich ({status})")
 
 
-def verbinde(base: str, timeout: float = 10.0) -> socket.socket:
+def verbinde(base: str, timeout: float = 10.0, quelle: str | None = None) -> socket.socket:
+    """Verbindung zum Dienst, auf Wunsch von einer anderen Loopback-Adresse."""
     teile = urlsplit(base)
-    return socket.create_connection((teile.hostname, teile.port), timeout=timeout)
+    return socket.create_connection((teile.hostname, teile.port), timeout=timeout,
+                                    source_address=(quelle, 0) if quelle else None)
 
 
-def roh(base: str, daten: bytes, timeout: float = 10.0) -> bytes:
+def roh(base: str, daten: bytes, timeout: float = 10.0, quelle: str | None = None) -> bytes:
     """Schickt Bytes unveraendert und liest, bis der Dienst schliesst."""
-    with verbinde(base, timeout) as sock:
+    with verbinde(base, timeout, quelle) as sock:
         sock.sendall(daten)
         antwort = b""
         while True:
@@ -159,13 +162,13 @@ class TestBild:
                 with sperre:
                     ergebnisse.append((status, is_jpeg(body)))
 
-            threads = [threading.Thread(target=abrufen) for _ in range(10)]
+            threads = [threading.Thread(target=abrufen) for _ in range(8)]
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join(timeout=20)
 
-        assert len(ergebnisse) == 10
+        assert len(ergebnisse) == 8
         assert all(status == 200 and gueltig for status, gueltig in ergebnisse)
 
     def test_rumpf_null_ist_erlaubt(self, fake_ffmpeg):
@@ -373,8 +376,26 @@ class TestGrenzen:
         cameras = {"tuer": CameraConfig(name="tuer", url="rtsp://host/s",
                                         timeout=1.0, idle_timeout=0)}
         with dienst(fake_ffmpeg, cameras=cameras, lesefrist=0.5,
-                    bremse=Bremse(max_wait=0.5)) as base, verbinde(base) as sock:
-            # Frist: 2 x 0.5 + 0.5 + 1.0 = 2.5 s
+                    kopffrist=10.0) as base, verbinde(base) as sock:
+            # Frist: 10 + 1.0 + 0.5 = 11.5 s -- die Kopffrist greift hier nicht
+            beginn = time.monotonic()
+            sock.sendall(b"GET /cam/tuer.jpg HTTP/1.1\r\n")
+            geschlossen = False
+            while time.monotonic() - beginn < 15.0:
+                try:
+                    sock.sendall(b"X")
+                except OSError:
+                    geschlossen = True
+                    break
+                time.sleep(0.3)
+            dauer = time.monotonic() - beginn
+        assert geschlossen
+        assert dauer < 14.0, f"Verbindung blieb {dauer:.1f}s offen"
+
+    def test_kopfzeilen_haben_eine_kurze_frist(self, fake_ffmpeg):
+        """Bis zum Ende der Kopfzeilen gilt die kurze Frist, nicht die Gesamtfrist."""
+        with dienst(fake_ffmpeg, lesefrist=5.0, kopffrist=0.5) as base, \
+                verbinde(base) as sock:
             beginn = time.monotonic()
             sock.sendall(b"GET /cam/tuer.jpg HTTP/1.1\r\n")
             geschlossen = False
@@ -384,10 +405,19 @@ class TestGrenzen:
                 except OSError:
                     geschlossen = True
                     break
-                time.sleep(0.3)
+                time.sleep(0.2)
             dauer = time.monotonic() - beginn
         assert geschlossen
-        assert dauer < 5.0, f"Verbindung blieb {dauer:.1f}s offen"
+        assert dauer < 2.5, f"Verbindung blieb {dauer:.1f}s offen"
+
+    def test_kopffrist_endet_mit_den_kopfzeilen(self, fake_ffmpeg, monkeypatch):
+        """Wartet die Anfrage danach auf die Kamera, bricht die Kopffrist sie nicht ab."""
+        monkeypatch.setenv("FAKE_START_DELAY", "1.0")
+        cameras = {"tuer": CameraConfig(name="tuer", url="rtsp://host/s",
+                                        timeout=5.0, idle_timeout=0)}
+        with dienst(fake_ffmpeg, cameras=cameras, kopffrist=0.3) as base:
+            status, _, _ = hole(f"{base}/cam/tuer.jpg")
+        assert status == 200
 
     def test_obergrenze_gleichzeitiger_verbindungen(self, fake_ffmpeg):
         with dienst(fake_ffmpeg, max_verbindungen=2) as base:
@@ -409,3 +439,41 @@ class TestGrenzen:
             time.sleep(0.3)
             # Plaetze werden wieder frei
             assert hole(f"{base}/cam/tuer.jpg")[0] == 200
+
+    def test_obergrenze_je_gegenstelle(self, fake_ffmpeg):
+        """Eine einzelne Adresse kann nicht alle Plaetze belegen."""
+        with dienst(fake_ffmpeg, max_je_gegenstelle=2) as base:
+            belegt = [verbinde(base), verbinde(base)]
+            try:
+                time.sleep(0.3)
+                antwort = roh(base, b"GET /cam/tuer.jpg HTTP/1.1\r\n\r\n")
+                assert antwort == b""
+                andere = roh(base, b"GET /cam/tuer.jpg HTTP/1.1\r\n\r\n",
+                             quelle="127.0.0.2")
+                assert zerlege(andere)[0] == 200
+            finally:
+                for sock in belegt:
+                    sock.close()
+
+    def test_eigener_proxy_ist_von_der_grenze_je_gegenstelle_ausgenommen(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg, max_je_gegenstelle=2,
+                    trust_proxy=netze("127.0.0.1", "test")) as base:
+            belegt = [verbinde(base), verbinde(base)]
+            try:
+                time.sleep(0.3)
+                antwort = roh(base, b"GET /cam/tuer.jpg HTTP/1.1\r\n\r\n")
+                assert zerlege(antwort)[0] == 200
+            finally:
+                for sock in belegt:
+                    sock.close()
+
+    def test_allow_from_schliesst_fremde_sofort(self, fake_ffmpeg):
+        with dienst(fake_ffmpeg, allow_from=netze("127.0.0.2", "test")) as base:
+            beginn = time.monotonic()
+            fremd = roh(base, b"GET /cam/tuer.jpg HTTP/1.1\r\n\r\n")
+            dauer = time.monotonic() - beginn
+            erlaubt = roh(base, b"GET /cam/tuer.jpg HTTP/1.1\r\n\r\n",
+                          quelle="127.0.0.2")
+        assert fremd == b""
+        assert dauer < 1.0
+        assert zerlege(erlaubt)[0] == 200

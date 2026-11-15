@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs
 
-from .config import Config
+from .config import Config, im_netz
 from .grabber import GrabberPool
 
 log = logging.getLogger(__name__)
@@ -33,7 +33,9 @@ _METHODE = re.compile(r"[A-Z]{1,16}")
 
 # Feste Grenzen. Sie stehen absichtlich nicht in der Konfiguration.
 LESEFRIST = 5.0          # Sekunden je Lese- oder Schreibvorgang auf dem Socket
+KOPFFRIST = 2.0          # Sekunden bis Anfragezeile und Kopfzeilen vollstaendig sind
 MAX_VERBINDUNGEN = 32    # gleichzeitig offene Verbindungen insgesamt
+MAX_JE_GEGENSTELLE = 8   # davon je Adresse (der eigene Proxy ausgenommen)
 _MAX_ZEILE = 2048        # Anfragezeile
 _MAX_KOPF = 8192         # Anfragezeile und Kopfzeilen zusammen
 _MAX_PARAMETER = 8       # Abfrageparameter
@@ -72,32 +74,30 @@ class _BegrenzterLeser:
 
 
 class Bremse:
-    """Verzoegert die Pruefung fuer Gegenstellen, die schon falsch lagen.
+    """Sperrt Gegenstellen, die falsch lagen, fuer eine wachsende Frist.
 
-    Die Wartezeit liegt *vor* der Pruefung, und gleichzeitige Versuche
-    derselben Gegenstelle bekommen nacheinander liegende Zeitfenster: zehn
-    parallele Versuche dauern zusammen so lange wie zehn nacheinander. Wird
-    die Warteschlange einer Gegenstelle laenger als ``max_wait``, weist der
-    Dienst weitere Versuche ab, ohne sie zu pruefen.
+    Waehrend der Sperre prueft der Dienst nichts, sondern weist sofort ab --
+    kein Versuch wartet auf einem Verbindungsplatz. Gleichzeitige Versuche
+    derselben Gegenstelle: der erste darf pruefen und belegt dabei schon die
+    Frist, die uebrigen werden abgewiesen.
     """
 
     def __init__(self, max_delay: float = 2.0, reset_after: float = 900.0,
-                 max_entries: int = 4096, max_wait: float = 10.0) -> None:
+                 max_entries: int = 4096) -> None:
         self._max_delay = max_delay
         self._reset_after = reset_after
         self._max_entries = max_entries
-        self.max_wait = max_wait
         self._lock = threading.Lock()
-        # Gegenstelle -> (Fehlversuche, letzter Fehlversuch, naechstes freies Fenster)
+        # Gegenstelle -> (Fehlversuche, letzter Fehlversuch, gesperrt bis)
         self._fehlversuche: dict[str, tuple[int, float, float]] = {}
 
     def _delay(self, count: int) -> float:
         return min(self._max_delay, 0.1 * (2 ** min(count, 8)))
 
-    def reserve(self, client: str) -> float | None:
-        """Wartezeit vor der Pruefung -- ``None`` heisst: gar nicht pruefen.
+    def darf_pruefen(self, client: str) -> bool:
+        """Darf dieser Versuch geprueft werden?
 
-        Ein unbekannter Absender wartet nie. Der Nullpunkt von monotonic()
+        Ein unbekannter Absender darf immer. Der Nullpunkt von monotonic()
         ist beliebig gewaehlt; deshalb zaehlt "kein Eintrag", nicht ein
         Vergleich gegen 0.0.
         """
@@ -105,20 +105,18 @@ class Bremse:
         with self._lock:
             eintrag = self._fehlversuche.get(client)
             if eintrag is None:
-                return 0.0
-            count, last, frei = eintrag
+                return True
+            count, last, gesperrt_bis = eintrag
             if now - last > self._reset_after:
                 del self._fehlversuche[client]
-                return 0.0
-            beginn = max(now, frei)
-            ende = beginn + self._delay(count)
-            if ende - now > self.max_wait:
-                return None
-            self._fehlversuche[client] = (count, last, ende)
-            return ende - now
+                return True
+            if now < gesperrt_bis:
+                return False
+            self._fehlversuche[client] = (count, last, now + self._delay(count))
+            return True
 
     def delay_for(self, client: str) -> float:
-        """Grundverzoegerung dieser Gegenstelle, ohne etwas zu reservieren."""
+        """Sperrfrist dieser Gegenstelle nach dem naechsten Fehlversuch."""
         with self._lock:
             eintrag = self._fehlversuche.get(client)
             if eintrag is None or time.monotonic() - eintrag[1] > self._reset_after:
@@ -129,12 +127,9 @@ class Bremse:
         now = time.monotonic()
         with self._lock:
             eintrag = self._fehlversuche.get(client)
-            if eintrag is None or now - eintrag[1] > self._reset_after:
-                count, frei = 0, now
-            else:
-                count, frei = eintrag[0], eintrag[2]
-            count += 1
-            self._fehlversuche[client] = (count, now, frei)
+            vergessen = eintrag is None or now - eintrag[1] > self._reset_after
+            count = 1 if vergessen else eintrag[0] + 1  # type: ignore[index]
+            self._fehlversuche[client] = (count, now, now + self._delay(count))
             if len(self._fehlversuche) > self._max_entries:
                 # Aeltesten Eintrag verwerfen -- der Speicher darf nicht
                 # unbegrenzt wachsen, nur weil jemand die Quell-IP wechselt.
@@ -155,6 +150,7 @@ class Handler(BaseHTTPRequestHandler):
     config: Config
     pool: GrabberPool
     bremse: Bremse
+    kopffrist: float
     verbindungsfrist: float
 
     # -- Verbindung --------------------------------------------------------
@@ -162,13 +158,17 @@ class Handler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         super().setup()
         self.rfile = _BegrenzterLeser(self.rfile, _MAX_KOPF)  # type: ignore[assignment]
-        # Harte Obergrenze fuer die ganze Verbindung, unabhaengig davon, wie
-        # langsam die Gegenstelle Byte fuer Byte liefert.
+        # Harte Obergrenzen, unabhaengig davon, wie langsam die Gegenstelle
+        # Byte fuer Byte liefert: eine kurze bis zum Ende der Kopfzeilen,
+        # eine fuer die ganze Verbindung.
+        self._kopfwecker = threading.Timer(self.kopffrist, self._abbrechen)
         self._wecker = threading.Timer(self.verbindungsfrist, self._abbrechen)
-        self._wecker.daemon = True
-        self._wecker.start()
+        for wecker in (self._kopfwecker, self._wecker):
+            wecker.daemon = True
+            wecker.start()
 
     def finish(self) -> None:
+        self._kopfwecker.cancel()
         self._wecker.cancel()
         with contextlib.suppress(OSError):
             super().finish()
@@ -196,6 +196,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
             except _KopfZuGrossError:
                 return self._antwort(HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE)
+            self._kopfwecker.cancel()
             if self.request_version not in ("HTTP/1.0", "HTTP/1.1"):
                 return
             if self.command != "GET":
@@ -221,10 +222,13 @@ class Handler(BaseHTTPRequestHandler):
     def client_name(self) -> str:
         """Gegenstelle -- hinter einem Proxy die von ihm gemeldete Adresse.
 
-        Massgeblich ist der letzte Eintrag in X-Forwarded-For: den hat der
-        eigene Proxy angehaengt. Alles davor stammt vom Absender selbst.
+        X-Forwarded-For zaehlt nur, wenn die Verbindung von einem der in
+        ``trust_proxy`` genannten Proxys kommt. Massgeblich ist dann der
+        letzte Eintrag: den hat der eigene Proxy angehaengt. Alles davor
+        stammt vom Absender selbst.
         """
-        if self.config.server.trust_proxy and getattr(self, "headers", None) is not None:
+        if (im_netz(self.client_address[0], self.config.server.trust_proxy)
+                and getattr(self, "headers", None) is not None):
             forwarded = self.headers.get_all("X-Forwarded-For") or []
             if forwarded:
                 letzter = forwarded[-1].split(",")[-1].strip()
@@ -270,17 +274,14 @@ class Handler(BaseHTTPRequestHandler):
         client = self.client_name()
 
         if self._zugang_noetig():
-            warten = self.bremse.reserve(client)
-            if warten is None:
-                log.debug("Abgewiesen ohne Pruefung: %s (zu viele Fehlversuche)", client)
-                return  # Verbindung wortlos schliessen
-            if warten:
-                time.sleep(warten)
+            kopf = [("WWW-Authenticate", 'Basic realm="rtsp2jpeg"')] \
+                if self.config.server.basic_auth else []
+            if not self.bremse.darf_pruefen(client):
+                log.debug("Abgewiesen ohne Pruefung: %s (gesperrt)", client)
+                return self._antwort(HTTPStatus.UNAUTHORIZED, *kopf)
             if not self._authorized(abfrage):
                 versuche = self.bremse.note_failure(client)
                 log.warning("Abgewiesen: %s (%d. Fehlversuch)", client, versuche)
-                kopf = [("WWW-Authenticate", 'Basic realm="rtsp2jpeg"')] \
-                    if self.config.server.basic_auth else []
                 return self._antwort(HTTPStatus.UNAUTHORIZED, *kopf)
             self.bremse.note_success(client)
 
@@ -354,26 +355,59 @@ class Server(ThreadingHTTPServer):
     address_family = socket.AF_INET
 
     def __init__(self, address: tuple[str, int], handler: type[Handler],
-                 max_verbindungen: int = MAX_VERBINDUNGEN) -> None:
-        self._plaetze = threading.BoundedSemaphore(max_verbindungen)
+                 max_verbindungen: int = MAX_VERBINDUNGEN,
+                 max_je_gegenstelle: int = MAX_JE_GEGENSTELLE,
+                 config: Config | None = None) -> None:
+        self._max_verbindungen = max_verbindungen
+        self._max_je_gegenstelle = max_je_gegenstelle
+        self._erlaubt = config.server.allow_from if config else ()
+        self._proxys = config.server.trust_proxy if config else ()
+        self._platz_lock = threading.Lock()
+        self._belegt = 0
+        self._je_gegenstelle: dict[str, int] = {}
         super().__init__(address, handler)
 
+    def _belegen(self, adresse: str) -> bool:
+        with self._platz_lock:
+            eigene = self._je_gegenstelle.get(adresse, 0)
+            if self._belegt >= self._max_verbindungen:
+                return False
+            if eigene >= self._max_je_gegenstelle and not im_netz(adresse, self._proxys):
+                return False
+            self._belegt += 1
+            self._je_gegenstelle[adresse] = eigene + 1
+            return True
+
+    def _freigeben(self, adresse: str) -> None:
+        with self._platz_lock:
+            self._belegt -= 1
+            eigene = self._je_gegenstelle.get(adresse, 0) - 1
+            if eigene > 0:
+                self._je_gegenstelle[adresse] = eigene
+            else:
+                self._je_gegenstelle.pop(adresse, None)
+
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._plaetze.acquire(blocking=False):
+        adresse = client_address[0]
+        if self._erlaubt and not im_netz(adresse, self._erlaubt):
+            # Nicht in allow_from: schliessen, bevor irgendetwas gelesen wird.
+            self.shutdown_request(request)
+            return
+        if not self._belegen(adresse):
             # Kein Platz frei: Verbindung sofort schliessen, ohne Antwort.
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except BaseException:
-            self._plaetze.release()
+            self._freigeben(adresse)
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._plaetze.release()
+            self._freigeben(client_address[0])
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         log.debug("Verbindung mit Fehler beendet")
@@ -381,7 +415,9 @@ class Server(ThreadingHTTPServer):
 
 def make_server(config: Config, pool: GrabberPool, *,
                 max_verbindungen: int = MAX_VERBINDUNGEN,
+                max_je_gegenstelle: int = MAX_JE_GEGENSTELLE,
                 lesefrist: float = LESEFRIST,
+                kopffrist: float = KOPFFRIST,
                 bremse: Bremse | None = None) -> Server:
     bremse = bremse or Bremse()
     laengste_wartezeit = max(c.timeout for c in config.cameras.values())
@@ -392,10 +428,13 @@ def make_server(config: Config, pool: GrabberPool, *,
             "pool": pool,
             "bremse": bremse,
             "timeout": lesefrist,
-            "verbindungsfrist": 2 * lesefrist + bremse.max_wait + laengste_wartezeit,
+            "kopffrist": kopffrist,
+            # Kopfzeilen, Warten auf das Bild, Schreiben der Antwort
+            "verbindungsfrist": kopffrist + laengste_wartezeit + lesefrist,
         },
     )
-    return Server((config.server.host, config.server.port), handler, max_verbindungen)
+    return Server((config.server.host, config.server.port), handler,
+                  max_verbindungen, max_je_gegenstelle, config)
 
 
 def token_erzeugen(laenge: int = 24) -> str:

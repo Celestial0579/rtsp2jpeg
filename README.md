@@ -138,12 +138,20 @@ Dabei gilt:
   ohnehin nichts anderes; Caddy grenzt zusätzlich ab.
 - **Immer HTTPS.** Ohne TLS steht das Token bei jedem Abruf im Klartext im
   Netz.
-- **`trust_proxy` nur mit echtem Proxy davor.** Ausgewertet wird der letzte
-  Eintrag in `X-Forwarded-For` — den hängt der eigene Proxy an. Ohne Proxy
-  könnte jeder seine Herkunft frei erfinden.
-- Nach einem Fehlversuch prüft der Dienst weitere Versuche derselben
-  Gegenstelle erst nach einer Wartezeit (ansteigend bis zwei Sekunden), auch
-  wenn sie gleichzeitig eintreffen.
+- **`trust_proxy` nennt die Adresse des Proxys**, nicht bloß `true`.
+  `X-Forwarded-For` zählt nur bei Verbindungen von dort, und zwar der letzte
+  Eintrag — den hängt der eigene Proxy an. Wer am Proxy vorbei direkt kommt,
+  zählt mit seiner echten Adresse. Das Beispiel gibt Caddy dafür eine feste
+  Adresse.
+- **`allow_from` schließt alle anderen aus.** Im Beispiel darf nur Caddy
+  verbinden; im LAN genügt die Adresse der STARFACE. Andere Verbindungen
+  schließt der Dienst, bevor er etwas liest.
+- **Kein Zugriffsprotokoll mit Abfrageteil.** Das Token steht in der URL.
+  Das Caddy-Beispiel schreibt deshalb kein Zugriffsprotokoll; jeder andere
+  vorgelagerte Proxy muss die URL ebenso behandeln.
+- Nach einem Fehlversuch ist die Gegenstelle für eine kurze Frist gesperrt
+  (ansteigend bis zwei Sekunden): Versuche in dieser Zeit prüft der Dienst
+  nicht, sondern weist sie sofort ab, auch wenn sie gleichzeitig eintreffen.
 
 ## Schnittstelle
 
@@ -156,9 +164,10 @@ Dabei gilt:
 - Nur `GET`, ohne Rumpf. Andere Methoden und Anfragen mit Rumpf weist der
   Dienst ab.
 - Fehlerantworten haben keinen Inhalt — auch keine Meldung der Kamera.
-- Feste Grenzen: 5 s je Lese- oder Schreibvorgang, eine Höchstdauer je
-  Verbindung, höchstens 32 gleichzeitige Verbindungen, 8 KiB für
-  Anfragezeile und Kopfzeilen.
+- Feste Grenzen: 2 s bis Anfragezeile und Kopfzeilen vollständig sind,
+  5 s je Lese- oder Schreibvorgang, eine Höchstdauer je Verbindung, 8 KiB
+  für Anfragezeile und Kopfzeilen, höchstens 32 gleichzeitige Verbindungen
+  und davon 8 je Adresse (der Proxy aus `trust_proxy` ausgenommen).
 - Liefert die Kamera innerhalb von `timeout` kein Bild, antwortet der Dienst
   mit einem leeren `503`.
 
@@ -187,8 +196,13 @@ Auf der Serverseite:
 | `token` | — | Zugangstoken für `?token=…` |
 | `basic_auth` | — | `benutzer:passwort` für den URL-Vorspann |
 | `allow_anonymous` | false | Betrieb ganz ohne Zugangsschutz zulassen |
-| `trust_proxy` | false | `X-Forwarded-For` auswerten — nur mit echtem Proxy davor |
+| `trust_proxy` | — | Adresse(n) des eigenen Proxys; nur von dort zählt `X-Forwarded-For` |
+| `allow_from` | — | nur diese Adressen oder Netze bedienen, alle anderen sofort trennen |
 | `access_log` | true | jeden Abruf protokollieren (ohne Abfrageteil der URL) |
+
+`trust_proxy` und `allow_from` nehmen IPv4-Adressen oder Netze, in der Datei
+als Liste, in der Umgebung (`TRUST_PROXY`, `ALLOW_FROM`) durch Kommas
+getrennt, etwa `172.29.80.2` oder `10.0.0.0/24`.
 
 Schalter wie `allow_anonymous` müssen echte Wahrheitswerte sein: `true` oder
 `false` ohne Anführungszeichen. Text wie `"false"` — auch aus einer

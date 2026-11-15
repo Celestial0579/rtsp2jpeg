@@ -20,7 +20,10 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-daten:/data
       - caddy-config:/config
-      - caddy-log:/var/log/caddy
+    networks:
+      intern:
+        # Feste Adresse: rtsp2jpeg vertraut X-Forwarded-For nur von hier.
+        ipv4_address: 172.29.80.2
     depends_on:
       - rtsp2jpeg
 
@@ -31,13 +34,16 @@ services:
     # Caddy. Damit gibt es keinen ungeschuetzten Weg am TLS vorbei.
     expose:
       - "8080"
+    networks:
+      - intern
     environment:
       CAMERA_URL: rtsp://${KAMERA_USER}:${KAMERA_PASS}@192.168.1.50:554/stream1
       CAMERA_NAME: tuer
       TOKEN: ${RTSP2JPEG_TOKEN:?RTSP2JPEG_TOKEN muss gesetzt sein}
-      # Nur einschalten, weil hier wirklich ein Proxy davorsteht: sonst
-      # koennte jeder seine Herkunft per X-Forwarded-For frei erfinden.
-      TRUST_PROXY: "1"
+      # Adresse von Caddy (oben): nur von dort zaehlt X-Forwarded-For.
+      TRUST_PROXY: "172.29.80.2"
+      # Nur Caddy darf ueberhaupt verbinden.
+      ALLOW_FROM: "172.29.80.2"
       TZ: Europe/Berlin
     read_only: true
     tmpfs:
@@ -47,7 +53,12 @@ services:
     security_opt:
       - no-new-privileges:true
 
+networks:
+  intern:
+    ipam:
+      config:
+        - subnet: 172.29.80.0/24
+
 volumes:
   caddy-daten:
   caddy-config:
-  caddy-log:
