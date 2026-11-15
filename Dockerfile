@@ -1,9 +1,13 @@
-FROM python:3.12-alpine
+# Basisabbild per Digest festgelegt; Dependabot schlaegt neue vor.
+FROM python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
 
 # ffmpeg macht die eigentliche Arbeit; tini raeumt Zombie-Prozesse ab,
 # weil rtsp2jpeg staendig ffmpeg-Kindprozesse startet und beendet.
+# Python-Pakete nur in fester Version und mit Pruefsumme.
+COPY requirements.txt /tmp/requirements.txt
 RUN apk add --no-cache ffmpeg tini \
- && pip install --no-cache-dir "PyYAML>=6.0,<7"
+ && pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
+ && rm /tmp/requirements.txt
 
 WORKDIR /app
 COPY rtsp2jpeg/ /app/rtsp2jpeg/
