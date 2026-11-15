@@ -1,5 +1,37 @@
 # Änderungen
 
+## 0.2.3
+
+### Kann den Start verhindern
+
+Diese Angaben ließ der Dienst bisher durchgehen; jetzt bricht er den Start
+mit einer Meldung ab:
+
+- `allow_from` / `ALLOW_FROM` gesetzt, aber leer (`""`, `[]`, ohne Wert).
+  Wer keine Einschränkung will, lässt die Einstellung weg.
+- Token mit anderen Zeichen als `A–Z a–z 0–9 - _ . ~`; solche Zeichen kämen
+  in `?token=` verändert an. Ein neues Token liefert `--token-erzeugen`.
+- `nan` oder `inf` in Kamera-Zahlenwerten (`fps`, `idle_timeout`, `max_age`,
+  `timeout`, `read_timeout`).
+
+### Sicherheit
+
+- Kamera-Zugangsdaten werden auch geschwärzt, wenn sie nicht in
+  `benutzer:passwort@` stehen: alle Werte nach `=` in Pfad und Abfrageteil
+  der Kamera-URL sowie die eigenen Argumente aus `input_args`/`output_args`,
+  in allen Protokollzeilen, auch auf DEBUG und in Meldungen von ffmpeg.
+  Wer Zugangsdaten so angegeben hat: alte Protokolle löschen und das
+  Kamera-Passwort wechseln.
+- Internet-Beispiel: Caddy ersetzt das Token in seinen eigenen Protokollen,
+  auch in Fehlereinträgen. Wer das Beispiel nutzt: den neuen `Caddyfile`
+  übernehmen, den Caddy-Container neu anlegen und das Token wechseln.
+
+### Geändert
+
+- Internet-Beispiel: Caddy läuft eingeschränkt wie rtsp2jpeg (`read_only`,
+  `cap_drop: ALL` außer `NET_BIND_SERVICE`, `no-new-privileges`).
+- Das Internet-Beispiel nutzt das Image `:0.2.3`.
+
 ## 0.2.2
 
 ### Geändert

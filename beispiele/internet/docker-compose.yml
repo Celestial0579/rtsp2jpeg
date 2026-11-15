@@ -39,7 +39,7 @@ services:
       - no-new-privileges:true
 
   rtsp2jpeg:
-    image: ghcr.io/celestial0579/rtsp2jpeg:0.2.2
+    image: ghcr.io/celestial0579/rtsp2jpeg:0.2.3
     restart: unless-stopped
     # Kein "ports"-Eintrag: erreichbar ist der Dienst ausschliesslich ueber
     # Caddy. Damit gibt es keinen ungeschuetzten Weg am TLS vorbei.
