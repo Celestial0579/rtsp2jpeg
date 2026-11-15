@@ -108,8 +108,9 @@ eigenen Haustür gehört nicht ins offene Netz. Fehlen `token` und `basic_auth`,
 bricht der Start mit einer Anleitung ab und Exit-Code 3.
 
 Ebenso, wenn der Zugang zu schwach ist: ein Token unter 24 Zeichen, ein
-Passwort in `basic_auth` unter 16 Zeichen oder Leerraum am Anfang oder Ende
-(meist ein Zeilenende aus einer `.env`-Datei).
+Token mit anderen Zeichen als `A–Z a–z 0–9 - _ . ~` (die kämen in der URL
+verändert an), ein Passwort in `basic_auth` unter 16 Zeichen oder Leerraum am
+Anfang oder Ende (meist ein Zeilenende aus einer `.env`-Datei).
 
 Soll der Dienst wirklich ohne Schutz laufen — etwa in einem abgeschotteten
 Netz, in dem er ohnehin niemand erreicht —, muss das ausdrücklich dastehen:
@@ -203,7 +204,7 @@ Auf der Serverseite:
 | `basic_auth` | — | `benutzer:passwort` für den URL-Vorspann |
 | `allow_anonymous` | false | Betrieb ganz ohne Zugangsschutz zulassen |
 | `trust_proxy` | — | Adresse(n) des eigenen Proxys; nur von dort zählt `X-Forwarded-For` |
-| `allow_from` | — | nur diese Adressen oder Netze bedienen, alle anderen sofort trennen |
+| `allow_from` | — | nur diese Adressen oder Netze bedienen, alle anderen sofort trennen; gesetzt, aber leer, startet der Dienst nicht |
 | `access_log` | true | jeden Abruf protokollieren (ohne Abfrageteil der URL) |
 
 `trust_proxy` und `allow_from` nehmen IPv4-Adressen oder Netze, in der Datei

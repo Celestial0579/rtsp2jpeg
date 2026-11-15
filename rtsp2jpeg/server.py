@@ -443,6 +443,8 @@ def token_erzeugen(laenge: int = 24) -> str:
 
 
 MIN_TOKEN = 24      # Zeichen
+# Kommt in ?token=... unveraendert an, ohne Prozentkodierung.
+_URL_SICHER = re.compile(r"[A-Za-z0-9._~-]+")
 MIN_PASSWORT = 16   # Zeichen im Passwortteil von basic_auth
 
 _NEU_ERZEUGEN = (
@@ -464,6 +466,12 @@ def _zu_schwach(config: Config) -> str | None:
                 "Das Token beginnt oder endet mit Leerraum -- der Dienst startet "
                 "nicht.\n\nMeist ist das ein Zeilenende aus einer .env-Datei oder "
                 "einem Secret. Den Wert ohne Leerraum eintragen."
+            )
+        if not _URL_SICHER.fullmatch(server.token):
+            return (
+                "Das Token enthaelt Zeichen, die in der URL nicht unveraendert "
+                "ankommen -- der Dienst startet nicht.\n\nErlaubt sind A-Z, a-z, "
+                f"0-9 sowie - _ . ~\n\n{_NEU_ERZEUGEN}"
             )
         if len(server.token) < MIN_TOKEN:
             return (

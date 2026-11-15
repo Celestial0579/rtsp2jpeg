@@ -306,6 +306,26 @@ class TestAllowAnonymous:
         assert [str(n) for n in config.server.allow_from] == ["192.168.1.10/32"]
         assert load_config(None, {"CAMERA_URL": "rtsp://h/s"}).server.allow_from == ()
 
+    @pytest.mark.parametrize("wert", ["", " ", " , "])
+    def test_leeres_allow_from_in_der_umgebung_startet_nicht(self, wert):
+        with pytest.raises(ConfigError, match="ALLOW_FROM ist gesetzt, aber leer"):
+            load_config(None, {"CAMERA_URL": "rtsp://h/s", "ALLOW_FROM": wert})
+
+    @pytest.mark.parametrize("zeile", ["allow_from:", 'allow_from: ""', "allow_from: []",
+                                       "allow_from: false"])
+    def test_leeres_allow_from_in_der_datei_startet_nicht(self, tmp_path, zeile):
+        path = write(tmp_path, f"server:\n  {zeile}\ncameras: {{t: {{url: rtsp://h/s}}}}\n")
+        with pytest.raises(ConfigError, match="allow_from ist gesetzt, aber leer"):
+            load_config(path, {})
+
+    @pytest.mark.parametrize("feld", ["fps", "idle_timeout", "max_age", "timeout",
+                                      "read_timeout"])
+    @pytest.mark.parametrize("wert", [".nan", ".inf", "-.inf", "nan", "inf"])
+    def test_zahlen_muessen_endlich_sein(self, tmp_path, feld, wert):
+        path = write(tmp_path, f"cameras: {{t: {{url: rtsp://h/s, {feld}: {wert}}}}}\n")
+        with pytest.raises(ConfigError, match="endliche Zahl"):
+            load_config(path, {})
+
     def test_allow_from_unzulaessig(self):
         with pytest.raises(ConfigError, match="ALLOW_FROM"):
             load_config(None, {"CAMERA_URL": "rtsp://h/s", "ALLOW_FROM": "tuerkamera"})
