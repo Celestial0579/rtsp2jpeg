@@ -1,5 +1,35 @@
 # Änderungen
 
+## 0.2.4
+
+### Sicherheit
+
+- Das Zugriffsprotokoll hat eine Grenze
+  ([GHSA-42jm-5fpq-65j5](https://github.com/Celestial0579/rtsp2jpeg/security/advisories/GHSA-42jm-5fpq-65j5)).
+  Bisher schrieb jede abgewiesene Anfrage eine Zeile, auch während der Sperre
+  der Bremse. Ein einzelner Absender ohne Token konnte so rund 1 GB je Stunde
+  erzeugen und die Platte des Hosts füllen. Zu abgewiesenen Anfragen und zu
+  Anfragen ohne aktuelles Bild schreibt der Dienst jetzt höchstens 20 Zeilen
+  am Stück, danach eine je 5 s, und meldet den Rest als Summe. Ausgelieferte
+  Bilder stehen weiter im Protokoll.
+- Die Compose-Beispiele begrenzen Dockers Protokolldateien (`max-size: 10m`,
+  `max-file: 3`), denn Dockers Vorgabe `json-file` rotiert nie. Wer eine
+  eigene Compose-Datei oder `docker run` nutzt: den Block `logging:`
+  übernehmen oder in `/etc/docker/daemon.json` eine Grenze setzen. Die Grenze
+  gilt erst für einen neu angelegten Container; `docker compose up -d` legt
+  ihn nach der Änderung neu an.
+
+### Behoben
+
+- `docker-compose.yml`: Der Wert von `RTSP2JPEG_TOKEN` steht in
+  Anführungszeichen. Ohne sie war die Zeile wegen `: ` in der Fehlermeldung
+  kein gültiges YAML.
+
+### Geändert
+
+- `SECURITY.md` beschreibt den privaten Meldeweg für Sicherheitslücken.
+- Das Internet-Beispiel nutzt das Image `:0.2.4`.
+
 ## 0.2.3
 
 ### Kann den Start verhindern
