@@ -9,7 +9,8 @@ import urllib.parse
 
 import rtsp2jpeg.server
 from rtsp2jpeg.config import CameraConfig, Config, ServerConfig, netze
-from rtsp2jpeg.server import Bremse, warn_ueber_die_absicherung
+from rtsp2jpeg.grabber import GrabberPool
+from rtsp2jpeg.server import Bremse, Protokollgrenze, make_server, warn_ueber_die_absicherung
 
 from .test_server import dienst, hole, hole_fehler, roh
 
@@ -272,3 +273,87 @@ class TestHinterEinemProxy:
                  headers={"X-Forwarded-For": "erfunden-und-sehr-lang"})
         assert "erfunden" not in caplog.text
         assert "127.0.0.1" in caplog.text
+
+
+class TestProtokollgrenze:
+    """Abgewiesene Anfragen fuellen das Protokoll nicht (GHSA-42jm-5fpq-65j5)."""
+
+    def test_vorrat_dann_takt_dann_summe(self, monkeypatch):
+        uhr = [100.0]
+        monkeypatch.setattr(rtsp2jpeg.server.time, "monotonic", lambda: uhr[0])
+        grenze = Protokollgrenze(je_sekunde=0.5, vorrat=3)
+        assert [grenze.darf() for _ in range(5)] == [
+            (True, 0), (True, 0), (True, 0), (False, 0), (False, 0)]
+        uhr[0] += 2.0  # eine Zeile nachgefuellt
+        assert grenze.darf() == (True, 2)
+        assert grenze.darf() == (False, 0)
+
+    def test_flut_ohne_token_bleibt_begrenzt(self, fake_ffmpeg, caplog):
+        token = "t" * 32
+        grenze = Protokollgrenze(je_sekunde=0.0, vorrat=5)
+        with caplog.at_level("INFO"), dienst(fake_ffmpeg, token=token, access_log=True,
+                                             bremse=Bremse(max_delay=0.0),
+                                             protokollgrenze=grenze) as base:
+            for _ in range(40):
+                hole_fehler(f"{base}/cam/tuer.jpg?token=falsch")
+                roh(base, b"POST / HTTP/1.1\r\n\r\n")
+            hole(f"{base}/cam/tuer.jpg?token={token}")
+        zeilen = [r for r in caplog.records if r.name == "rtsp2jpeg.server"]
+        # Vorrat, die ausgelieferte Anfrage und die Summe beim Beenden
+        assert len(zeilen) <= 5 + 1 + 1
+        assert '"GET /cam/tuer.jpg" 200' in caplog.text
+        assert "abgewiesene Anfragen nicht einzeln protokolliert" in zeilen[-1].getMessage()
+
+    def test_kamera_ohne_bild_bleibt_begrenzt(self, fake_ffmpeg, monkeypatch, caplog):
+        monkeypatch.setenv("FAKE_START_DELAY", "30")  # die Kamera liefert nie ein Bild
+        kameras = {"tuer": CameraConfig(name="tuer", url="rtsp://host/s", timeout=0.3,
+                                        idle_timeout=0)}
+        grenze = Protokollgrenze(je_sekunde=0.0, vorrat=2)
+        with caplog.at_level("INFO"), dienst(fake_ffmpeg, cameras=kameras,
+                                             protokollgrenze=grenze) as base:
+            for _ in range(6):
+                assert hole_fehler(f"{base}/cam/tuer.jpg")[0] == 503
+        texte = [r.getMessage() for r in caplog.records if r.name == "rtsp2jpeg.server"]
+        assert sum("kein aktuelles Bild" in t for t in texte) == 2
+        assert "4 abgewiesene Anfragen nicht einzeln protokolliert" in texte[-1]
+
+    def test_summe_auch_ohne_weitere_anfrage(self, monkeypatch):
+        uhr = [100.0]
+        monkeypatch.setattr(rtsp2jpeg.server.time, "monotonic", lambda: uhr[0])
+        grenze = Protokollgrenze(je_sekunde=0.5, vorrat=1)
+        assert grenze.nachtrag() == 0  # nichts offen
+        assert grenze.darf() == (True, 0)
+        assert [grenze.darf() for _ in range(3)] == [(False, 0)] * 3
+        assert grenze.nachtrag() == 0  # noch keine Zeile frei
+        uhr[0] += 2.0
+        assert grenze.nachtrag() == 3  # die Summe, ohne neue Anfrage
+        assert grenze.nachtrag() == 0
+        assert grenze.darf() == (False, 0)  # die freie Zeile ist verbraucht
+        assert grenze.nachtrag(endgueltig=True) == 1  # beim Beenden immer
+
+    def test_server_meldet_die_summe_von_selbst(self, fake_ffmpeg, monkeypatch, caplog):
+        uhr = [100.0]
+        monkeypatch.setattr(rtsp2jpeg.server.time, "monotonic", lambda: uhr[0])
+        grenze = Protokollgrenze(je_sekunde=0.5, vorrat=1)
+        kamera = CameraConfig(name="tuer", url="rtsp://host/s", fps=25,
+                              max_age=5.0, timeout=5.0, idle_timeout=0)
+        config = Config(server=ServerConfig(host="127.0.0.1", port=0),
+                        cameras={"tuer": kamera})
+        # Nur gebaut, nicht gestartet: service_actions ruft der Test selbst auf.
+        server = make_server(config, GrabberPool({"tuer": kamera}, ffmpeg=fake_ffmpeg),
+                             protokollgrenze=grenze)
+        with caplog.at_level("INFO"):
+            try:
+                grenze.darf()
+                for _ in range(4):
+                    grenze.darf()
+                server.service_actions()
+                assert "nicht einzeln" not in caplog.text  # noch keine Zeile frei
+                uhr[0] += 2.0
+                server.service_actions()
+                assert "4 abgewiesene Anfragen nicht einzeln protokolliert" in caplog.text
+                grenze.darf()
+                grenze.darf()
+            finally:
+                server.server_close()
+        assert "2 abgewiesene Anfragen nicht einzeln protokolliert" in caplog.text

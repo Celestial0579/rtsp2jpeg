@@ -19,7 +19,8 @@ from .conftest import is_jpeg
 
 @contextmanager
 def dienst(fake_ffmpeg, cameras=None, *, max_verbindungen=32, max_je_gegenstelle=8,
-           lesefrist=5.0, kopffrist=2.0, bremse=None, **server_kwargs):
+           lesefrist=5.0, kopffrist=2.0, bremse=None, protokollgrenze=None,
+           **server_kwargs):
     """Startet den HTTP-Dienst auf einem freien Port."""
     cameras = cameras or {
         "tuer": CameraConfig(
@@ -34,7 +35,8 @@ def dienst(fake_ffmpeg, cameras=None, *, max_verbindungen=32, max_je_gegenstelle
     pool.start()
     server = make_server(config, pool, max_verbindungen=max_verbindungen,
                          max_je_gegenstelle=max_je_gegenstelle, lesefrist=lesefrist,
-                         kopffrist=kopffrist, bremse=bremse)
+                         kopffrist=kopffrist, bremse=bremse,
+                         protokollgrenze=protokollgrenze)
     thread = threading.Thread(
         target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
     )

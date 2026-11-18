@@ -142,6 +142,65 @@ class Bremse:
             self._fehlversuche.pop(client, None)
 
 
+class Protokollgrenze:
+    """Begrenzt Protokollzeilen zu abgewiesenen Anfragen und zu Anfragen ohne Bild.
+
+    Abgewiesenes stammt meist von Fremden. Ohne Grenze schreibt ein einzelner
+    Absender ohne Token tausende Zeilen je Sekunde und fuellt die Platte des
+    Hosts. Erlaubt sind ``vorrat`` Zeilen am Stueck, danach ``je_sekunde``;
+    der Rest wird gezaehlt und mit der naechsten erlaubten Zeile als Summe
+    gemeldet. Kommt danach nichts mehr, meldet der Server die Summe, sobald
+    wieder eine Zeile frei ist (``nachtrag``), spaetestens beim Beenden.
+    Ausgelieferte Bilder zaehlen nicht dazu.
+    """
+
+    def __init__(self, je_sekunde: float = 0.2, vorrat: int = 20) -> None:
+        self._je_sekunde = je_sekunde
+        self._max = float(vorrat)
+        self._vorrat = float(vorrat)
+        self._zuletzt = time.monotonic()
+        self._unterdrueckt = 0
+        self._lock = threading.Lock()
+
+    def _auffuellen(self) -> None:
+        jetzt = time.monotonic()
+        self._vorrat = min(self._max,
+                           self._vorrat + (jetzt - self._zuletzt) * self._je_sekunde)
+        self._zuletzt = jetzt
+
+    def darf(self) -> tuple[bool, int]:
+        """(darf protokollieren, seit der letzten erlaubten Zeile unterdrueckt)."""
+        with self._lock:
+            self._auffuellen()
+            if self._vorrat < 1.0:
+                self._unterdrueckt += 1
+                return False, 0
+            self._vorrat -= 1.0
+            unterdrueckt, self._unterdrueckt = self._unterdrueckt, 0
+            return True, unterdrueckt
+
+    def nachtrag(self, endgueltig: bool = False) -> int:
+        """Noch nicht gemeldete Summe, sofern eine Zeile frei ist (verbraucht sie).
+
+        ``endgueltig`` (beim Beenden) gibt die Summe ohne freie Zeile heraus.
+        """
+        with self._lock:
+            if not self._unterdrueckt:
+                return 0
+            if not endgueltig:
+                self._auffuellen()
+                if self._vorrat < 1.0:
+                    return 0
+                self._vorrat -= 1.0
+            unterdrueckt, self._unterdrueckt = self._unterdrueckt, 0
+            return unterdrueckt
+
+
+def _unterdrueckte_melden(anzahl: int) -> None:
+    if anzahl:
+        log.warning("%d abgewiesene Anfragen nicht einzeln protokolliert", anzahl)
+
+
 class Handler(BaseHTTPRequestHandler):
     # HTTP/1.0: keine wiederverwendeten Verbindungen, eine Anfrage je Verbindung.
     protocol_version = "HTTP/1.0"
@@ -150,6 +209,7 @@ class Handler(BaseHTTPRequestHandler):
     config: Config
     pool: GrabberPool
     bremse: Bremse
+    protokollgrenze: Protokollgrenze
     kopffrist: float
     verbindungsfrist: float
 
@@ -236,8 +296,16 @@ class Handler(BaseHTTPRequestHandler):
                     return str(ipaddress.ip_address(letzter))
         return self.client_address[0]
 
+    def _abgewiesen_protokollieren(self) -> bool:
+        """Darf eine Zeile zu einer abgewiesenen Anfrage ins Protokoll?"""
+        darf, unterdrueckt = self.protokollgrenze.darf()
+        _unterdrueckte_melden(unterdrueckt)
+        return darf
+
     def _protokolliere(self, code: int) -> None:
         if not self.config.server.access_log:
+            return
+        if code != HTTPStatus.OK and not self._abgewiesen_protokollieren():
             return
         methode = self.command if self.command and _METHODE.fullmatch(self.command) else "-"
         pfad = getattr(self, "path", "").partition("?")[0]
@@ -281,7 +349,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._antwort(HTTPStatus.UNAUTHORIZED, *kopf)
             if not self._authorized(abfrage):
                 versuche = self.bremse.note_failure(client)
-                log.warning("Abgewiesen: %s (%d. Fehlversuch)", client, versuche)
+                if self._abgewiesen_protokollieren():
+                    log.warning("Abgewiesen: %s (%d. Fehlversuch)", client, versuche)
                 return self._antwort(HTTPStatus.UNAUTHORIZED, *kopf)
             self.bremse.note_success(client)
 
@@ -293,7 +362,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             frame = grabber.get_frame()
         except TimeoutError:
-            log.warning("Kamera %s: kein aktuelles Bild", grabber.camera.name)
+            # Begrenzt wie abgewiesene Anfragen: Ohne Bild schriebe sonst jede
+            # Anfrage eine Zeile (GHSA-42jm-5fpq-65j5).
+            if self._abgewiesen_protokollieren():
+                log.warning("Kamera %s: kein aktuelles Bild", grabber.camera.name)
             return self._antwort(HTTPStatus.SERVICE_UNAVAILABLE)
 
         self._protokolliere(HTTPStatus.OK)
@@ -367,6 +439,24 @@ class Server(ThreadingHTTPServer):
         self._je_gegenstelle: dict[str, int] = {}
         super().__init__(address, handler)
 
+    def service_actions(self) -> None:
+        """Laeuft in serve_forever nach jeder Runde, also spaetestens je poll_interval.
+
+        Meldet die Summe unterdrueckter Zeilen auch dann, wenn nach einem
+        Angriff keine Anfrage mehr kommt.
+        """
+        super().service_actions()
+        self._protokoll_nachtragen()
+
+    def server_close(self) -> None:
+        super().server_close()
+        self._protokoll_nachtragen(endgueltig=True)
+
+    def _protokoll_nachtragen(self, endgueltig: bool = False) -> None:
+        grenze = getattr(self.RequestHandlerClass, "protokollgrenze", None)
+        if grenze is not None:
+            _unterdrueckte_melden(grenze.nachtrag(endgueltig))
+
     def _belegen(self, adresse: str) -> bool:
         with self._platz_lock:
             eigene = self._je_gegenstelle.get(adresse, 0)
@@ -418,8 +508,10 @@ def make_server(config: Config, pool: GrabberPool, *,
                 max_je_gegenstelle: int = MAX_JE_GEGENSTELLE,
                 lesefrist: float = LESEFRIST,
                 kopffrist: float = KOPFFRIST,
-                bremse: Bremse | None = None) -> Server:
+                bremse: Bremse | None = None,
+                protokollgrenze: Protokollgrenze | None = None) -> Server:
     bremse = bremse or Bremse()
+    protokollgrenze = protokollgrenze or Protokollgrenze()
     laengste_wartezeit = max(c.timeout for c in config.cameras.values())
     handler = type(
         "BoundHandler", (Handler,),
@@ -427,6 +519,7 @@ def make_server(config: Config, pool: GrabberPool, *,
             "config": config,
             "pool": pool,
             "bremse": bremse,
+            "protokollgrenze": protokollgrenze,
             "timeout": lesefrist,
             "kopffrist": kopffrist,
             # Kopfzeilen, Warten auf das Bild, Schreiben der Antwort
@@ -557,4 +650,4 @@ def serve_forever(config: Config, pool: GrabberPool) -> None:  # pragma: no cove
         server.server_close()
 
 
-__all__ = ["Bremse", "Handler", "Server", "make_server", "serve_forever"]
+__all__ = ["Bremse", "Handler", "Protokollgrenze", "Server", "make_server", "serve_forever"]

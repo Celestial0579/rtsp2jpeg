@@ -26,3 +26,14 @@ def test_dienst_ist_eingeschraenkt(datei, name):
     assert d.get("cap_drop") == ["ALL"]
     assert set(d.get("cap_add") or []) <= {"NET_BIND_SERVICE"}
     assert "no-new-privileges:true" in (d.get("security_opt") or [])
+
+
+@pytest.mark.parametrize("datei, name", [
+    ("docker-compose.yml", "rtsp2jpeg"),
+    ("beispiele/internet/docker-compose.yml", "caddy"),
+    ("beispiele/internet/docker-compose.yml", "rtsp2jpeg"),
+])
+def test_protokoll_ist_begrenzt(datei, name):
+    """Ohne max-size rotiert Dockers json-file nie (GHSA-42jm-5fpq-65j5)."""
+    optionen = (dienst(datei, name).get("logging") or {}).get("options") or {}
+    assert optionen.get("max-size") and optionen.get("max-file")

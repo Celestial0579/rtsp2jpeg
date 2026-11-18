@@ -158,6 +158,12 @@ Dabei gilt:
 - Nach einem Fehlversuch ist die Gegenstelle für eine kurze Frist gesperrt
   (ansteigend bis zwei Sekunden): Versuche in dieser Zeit prüft der Dienst
   nicht, sondern weist sie sofort ab, auch wenn sie gleichzeitig eintreffen.
+- **Protokoll begrenzt.** Zu abgewiesenen Anfragen und zu Anfragen, für die
+  die Kamera kein aktuelles Bild hat, schreibt der Dienst höchstens 20 Zeilen
+  am Stück, danach eine je 5 s; den Rest meldet er als Summe, auch wenn danach
+  keine Anfrage mehr kommt. Ausgelieferte Bilder stehen immer im Protokoll.
+  Die Compose-Beispiele begrenzen zusätzlich Dockers Protokolldateien
+  (`max-size`, `max-file`) – ohne das rotiert Dockers Vorgabe `json-file` nie.
 
 ## Schnittstelle
 

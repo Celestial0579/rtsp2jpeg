@@ -10,7 +10,8 @@ services:
     environment:
       CONFIG_FILE: /config/config.yaml
       # Werte aus .env; nicht in die YAML-Datei schreiben.
-      RTSP2JPEG_TOKEN: ${RTSP2JPEG_TOKEN:?bitte in .env setzen -- Token erzeugen mit: docker compose run --rm rtsp2jpeg --token-erzeugen}
+      # In Anfuehrungszeichen: ": " in der Meldung waere sonst ungueltiges YAML.
+      RTSP2JPEG_TOKEN: "${RTSP2JPEG_TOKEN:?bitte in .env setzen -- Token erzeugen mit: docker compose run --rm rtsp2jpeg --token-erzeugen}"
       KAMERA_USER: ${KAMERA_USER:-}
       KAMERA_PASS: ${KAMERA_PASS:-}
       TZ: Europe/Berlin
@@ -23,3 +24,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Protokoll begrenzen: Anfragen aus dem Netz duerfen die Platte des
+    # Hosts nicht fuellen (Dockers Vorgabe json-file rotiert sonst nie).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

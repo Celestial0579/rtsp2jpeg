@@ -37,6 +37,13 @@ services:
       - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
+    # Protokoll begrenzen: Anfragen aus dem Netz duerfen die Platte des
+    # Hosts nicht fuellen (Dockers Vorgabe json-file rotiert sonst nie).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   rtsp2jpeg:
     image: ghcr.io/celestial0579/rtsp2jpeg:0.2.3
@@ -63,6 +70,13 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Protokoll begrenzen: Anfragen aus dem Netz duerfen die Platte des
+    # Hosts nicht fuellen (Dockers Vorgabe json-file rotiert sonst nie).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   intern:
