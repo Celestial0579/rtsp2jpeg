@@ -7,7 +7,7 @@
 
 services:
   rtsp-server:
-    image: bluenviron/mediamtx:1.21.3@sha256:59e43552f3be43695b70c19424dc2a42fcec18075f88d91561a24ac5d70a586c
+    image: bluenviron/mediamtx:1.21.4@sha256:c730bccdbc8739f8f0c13cefe9bea8b61926f599b88fa4d0d229baa91846c7bc
     healthcheck:
       test: ["CMD", "/mediamtx", "--version"]
       interval: 2s
